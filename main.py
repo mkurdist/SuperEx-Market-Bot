@@ -1,3 +1,51 @@
+import asyncio
+import os
+import io
+import time
+import uuid
+import logging
+import aiohttp
+import pandas as pd
+import mplfinance as mpf
+import matplotlib
+matplotlib.use('Agg') # Prevents GUI crashes on headless servers like Render
+
+from aiohttp import web
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.filters.callback_data import CallbackData
+from dotenv import load_dotenv
+
+# ---------------------------------------------------------
+# Configuration & Setup
+# ---------------------------------------------------------
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", 8080))
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+SYMBOL_MAP_CACHE = {}
+
+TIMEFRAME_MAP = {
+    "1m": 60,
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400
+}
+
+# ---------------------------------------------------------
+# Callback Data Factories
+# ---------------------------------------------------------
+class ChartCallback(CallbackData, prefix="chart"):
+    """Callback factory for chart timeframe buttons."""
+    symbol: str
+    timeframe: str
+
 # ---------------------------------------------------------
 # API Helper Functions
 # ---------------------------------------------------------
@@ -173,3 +221,137 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     buf.close()
     
     return image_bytes
+
+# ---------------------------------------------------------
+# Keyboards
+# ---------------------------------------------------------
+def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
+    """Generates the inline keyboard for timeframes and links."""
+    url_register = "https://app.superex.live/register?invitationCode=VQK2N6DDS"
+    url_group = "https://t.me/SuperexIR"
+    
+    base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(text="1m", callback_data=ChartCallback(symbol=base_symbol, timeframe="1m").pack()),
+            InlineKeyboardButton(text="15m", callback_data=ChartCallback(symbol=base_symbol, timeframe="15m").pack()),
+            InlineKeyboardButton(text="1h", callback_data=ChartCallback(symbol=base_symbol, timeframe="1h").pack()),
+            InlineKeyboardButton(text="4h", callback_data=ChartCallback(symbol=base_symbol, timeframe="4h").pack()),
+            InlineKeyboardButton(text="1d", callback_data=ChartCallback(symbol=base_symbol, timeframe="1d").pack()),
+        ],
+        [
+            InlineKeyboardButton(text="عضویت در گروه 👥", url=url_group),
+            InlineKeyboardButton(text="ثبت نام در صرافی 🏦", url=url_register)
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ---------------------------------------------------------
+# Message Handlers
+# ---------------------------------------------------------
+@dp.message(F.text)
+async def handle_ticker_input(message: types.Message):
+    """
+    Listens to any text message. Treats short, alphanumeric text as a crypto ticker.
+    """
+    text = message.text.strip().upper()
+    
+    if not text.isalnum() or len(text) > 10:
+        return
+        
+    symbol = text
+    processing_msg = await message.reply("⏳ Fetching data...")
+    
+    data = await fetch_price_data(symbol)
+    
+    if "error" in data:
+        await processing_msg.edit_text("❌ Symbol not found on SuperEx or Binance.")
+        return
+
+    # Formatting the caption
+    caption = (
+        f"🪙 **{data['symbol']}**\n"
+        f"💰 **P:** ${data['price']}\n"
+        f"📉 **24h:** {data['change_24h']}%\n\n"
+        f"📈 **H:** ${data['high']}\n"
+        f"📉 **L:** ${data['low']}\n"
+        f"📊 **Vol:** {data['volume']} USDT\n"
+    )
+    
+    if data.get("source") != "SuperEx":
+        caption += f"\n🌐 Source: {data['source']} Fallback"
+
+    try:
+        if data.get("source") == "SuperEx":
+            chart_bytes = await generate_chart_image(symbol, "1h")
+            photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
+            
+            await message.reply_photo(
+                photo=photo,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=get_price_keyboard(symbol)
+            )
+        else:
+            await message.reply(caption, parse_mode="Markdown")
+            
+    except Exception as e:
+        logging.error(f"Chart generation error: {e}")
+        await message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown")
+        
+    await processing_msg.delete()
+
+@dp.callback_query(ChartCallback.filter())
+async def process_chart_timeframe(query: types.CallbackQuery, callback_data: ChartCallback):
+    """
+    Handles inline button clicks to change the chart timeframe.
+    """
+    symbol = callback_data.symbol
+    timeframe = callback_data.timeframe
+    
+    await query.answer(f"Loading {timeframe} chart...")
+    
+    try:
+        chart_bytes = await generate_chart_image(symbol, timeframe)
+        new_photo = types.InputMediaPhoto(
+            media=BufferedInputFile(chart_bytes, filename=f"{symbol}_{timeframe}.png"),
+            caption=query.message.caption,
+            parse_mode="Markdown"
+        )
+        
+        await query.message.edit_media(
+            media=new_photo,
+            reply_markup=get_price_keyboard(symbol)
+        )
+    except Exception as e:
+        logging.error(f"Error updating chart: {e}")
+        await query.answer("Failed to update chart.", show_alert=True)
+
+# ---------------------------------------------------------
+# Web Server Setup (For Render)
+# ---------------------------------------------------------
+async def health_check(request):
+    """HTTP endpoint to keep the bot alive on Render."""
+    return web.Response(text="SuperEx Bot is Running smoothly!")
+
+async def main():
+    """Starts the web server and the bot polling."""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    
+    logging.info(f"🌐 Web server starting on port {PORT}")
+    await site.start()
+    
+    logging.info("🚀 Bot polling started")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("🛑 Bot stopped gracefully.")
