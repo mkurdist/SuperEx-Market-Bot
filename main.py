@@ -1,10 +1,15 @@
 import asyncio
 import os
 import io
+import time
+import uuid
 import logging
 import aiohttp
 import pandas as pd
 import mplfinance as mpf
+import matplotlib
+matplotlib.use('Agg') # Prevents GUI crashes on headless servers like Render
+
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
@@ -23,10 +28,8 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Cache for symbol to currencyId mapping
 SYMBOL_MAP_CACHE = {}
 
-# Timeframe mapping for SuperEx API
 TIMEFRAME_MAP = {
     "1m": 60,
     "15m": 900,
@@ -46,10 +49,23 @@ class ChartCallback(CallbackData, prefix="chart"):
 # ---------------------------------------------------------
 # API Helper Functions
 # ---------------------------------------------------------
+def get_superex_headers() -> dict:
+    """
+    Generates dynamic security headers required by SuperEx API.
+    """
+    return {
+        "accept": "*/*",
+        "accept-language": "en",
+        "client": "1",
+        "nonce": uuid.uuid4().hex,
+        "timestamp": str(int(time.time() * 1000)),
+        "token": "",
+        "content-type": "application/x-www-form-urlencoded"
+    }
+
 async def get_currency_id(symbol: str) -> str:
     """
     Fetches the currencyId for a given symbol from SuperEx.
-    Uses memory caching to avoid redundant API calls.
     """
     base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
     
@@ -59,97 +75,90 @@ async def get_currency_id(symbol: str) -> str:
     url = "https://api.superexchang.com/free-spot/v3/public/symbols"
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url) as response:
+            # Added security headers here!
+            async with session.get(url, headers=get_superex_headers()) as response:
                 if response.status == 200:
                     data = await response.json()
                     for item in data.get("data", []):
                         currency = item.get("currency", "").upper()
-                        currency_id = item.get("currencyId")
+                        currency_id = str(item.get("currencyId"))
                         if currency and currency_id:
                             SYMBOL_MAP_CACHE[currency] = currency_id
                     
                     return SYMBOL_MAP_CACHE.get(base_symbol)
+                else:
+                    logging.error(f"SuperEx API returned status {response.status}")
         except Exception as e:
             logging.error(f"Error fetching symbols mapping: {e}")
             
     return None
 
-async def fetch_coingecko_fallback(symbol: str) -> dict:
+async def fetch_binance_fallback(symbol: str) -> dict:
     """
-    Fallback to CoinGecko API if the symbol is not available on SuperEx.
+    Robust fallback to Binance API if the symbol is not available on SuperEx.
+    Binance is much more reliable on cloud servers than CoinGecko.
     """
-    base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
-    search_url = f"https://api.coingecko.com/api/v3/search?query={base_symbol}"
+    base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
+    binance_symbol = f"{base_symbol}USDT"
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            # 1. Search for the coin ID
-            async with session.get(search_url) as search_res:
-                if search_res.status == 200:
-                    search_data = await search_res.json()
-                    coins = search_data.get("coins", [])
-                    if not coins:
-                        return {"error": "Symbol not found on CoinGecko."}
-                    
-                    coin_id = coins[0].get("id")
-                    
-                    # 2. Fetch price data
-                    price_url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true"
-                    async with session.get(price_url) as price_res:
-                        if price_res.status == 200:
-                            price_data = await price_res.json()
-                            coin_data = price_data.get(coin_id, {})
-                            
-                            return {
-                                "symbol": base_symbol.upper(),
-                                "price": str(coin_data.get("usd", "0.0")),
-                                "change_24h": str(round(coin_data.get("usd_24h_change", 0.0), 2)),
-                                "high": "N/A",
-                                "low": "N/A",
-                                "volume": str(coin_data.get("usd_24h_vol", "0.0")),
-                                "source": "CoinGecko"
-                            }
-        except Exception as e:
-            logging.error(f"CoinGecko fallback error: {e}")
-            
-    return {"error": "Fallback failed."}
-
-async def fetch_price_data(symbol: str) -> dict:
-    """
-    Fetches the latest 24h ticker data from SuperEx.
-    Triggers fallback if symbol is missing.
-    """
-    currency_id = await get_currency_id(symbol)
-    
-    if not currency_id:
-        logging.warning(f"Symbol {symbol} not found on SuperEx. Trying fallback...")
-        return await fetch_coingecko_fallback(symbol)
-
-    url = f"https://api.superexchang.com/free-spot/v3/market/twentyfour?currencyId={currency_id}"
+    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={binance_symbol}"
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url) as response:
                 if response.status == 200:
+                    data = await response.json()
+                    return {
+                        "symbol": base_symbol,
+                        "price": data.get("lastPrice", "0.0"),
+                        "change_24h": data.get("priceChangePercent", "0.0"),
+                        "high": data.get("highPrice", "0.0"),
+                        "low": data.get("lowPrice", "0.0"),
+                        "volume": data.get("quoteVolume", "0.0"),
+                        "source": "Binance"
+                    }
+        except Exception as e:
+            logging.error(f"Binance fallback error: {e}")
+            
+    return {"error": "Symbol not found on SuperEx or Binance."}
+
+async def fetch_price_data(symbol: str) -> dict:
+    """
+    Fetches the latest 24h ticker data from SuperEx.
+    Triggers Binance fallback if symbol is missing.
+    """
+    currency_id = await get_currency_id(symbol)
+    
+    if not currency_id:
+        logging.warning(f"Symbol {symbol} not found on SuperEx. Trying Binance fallback...")
+        return await fetch_binance_fallback(symbol)
+
+    url = f"https://api.superexchang.com/free-spot/v3/market/twentyfour?currencyId={currency_id}"
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            # Added security headers here!
+            async with session.get(url, headers=get_superex_headers()) as response:
+                if response.status == 200:
                     res_data = await response.json()
                     return {
-                        "symbol": symbol.upper(),
-                        "price": res_data.get("hqzrsp", "0.0"),
-                        "change_24h": res_data.get("change", "0.0"),
-                        "high": res_data.get("maxPrice", "0.0"),
-                        "low": res_data.get("minPrice", "0.0"),
-                        "volume": res_data.get("sumAmount", "0.0"),
+                        "symbol": symbol.upper().replace("_USDT", "").replace("USDT", ""),
+                        "price": str(res_data.get("hqzrsp", "0.0")),
+                        "change_24h": str(res_data.get("change", "0.0")),
+                        "high": str(res_data.get("maxPrice", "0.0")),
+                        "low": str(res_data.get("minPrice", "0.0")),
+                        "volume": str(res_data.get("sumAmount", "0.0")),
                         "source": "SuperEx"
                     }
         except Exception as e:
             logging.error(f"Error fetching ticker for {symbol}: {e}")
             
-    return {"error": "Failed to fetch data."}
+    return await fetch_binance_fallback(symbol)
 
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
     Fetches real Kline (OHLCV) data from SuperEx and generates 
-    a professional candlestick chart using mplfinance.
+    a professional candlestick chart.
     """
     currency_id = await get_currency_id(symbol)
     if not currency_id:
@@ -159,7 +168,8 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     url = f"https://api.superexchang.com/free-spot/v3/klines?currencyId={currency_id}&timeType={time_type}&limit=60"
     
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
+        # Added security headers here!
+        async with session.get(url, headers=get_superex_headers()) as response:
             if response.status != 200:
                 raise ConnectionError("Failed to fetch kline data.")
             
@@ -183,7 +193,7 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     df.set_index("Date", inplace=True)
     df.sort_index(inplace=True)
 
-    # Styling the chart (Dark mode)
+    # Styling the chart
     mc = mpf.make_marketcolors(up='#00ff00', down='#ff0000', edge='inherit', wick='inherit', volume='in', ohlc='i')
     s = mpf.make_mpf_style(marketcolors=mc, base_mpf_style='nightclouds', facecolor='#1e1e1e', edgecolor='#444444', figcolor='#121212')
 
@@ -193,7 +203,7 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
         type='candle', 
         style=s, 
         volume=False, 
-        title=f"\n{symbol.upper()}/USDT | {timeframe}",
+        title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
         tight_layout=True,
         savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
     )
@@ -212,13 +222,15 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
     url_register = "https://app.superex.live/register?invitationCode=VQK2N6DDS"
     url_group = "https://t.me/SuperexIR"
     
+    base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
+    
     keyboard = [
         [
-            InlineKeyboardButton(text="1m", callback_data=ChartCallback(symbol=symbol, timeframe="1m").pack()),
-            InlineKeyboardButton(text="15m", callback_data=ChartCallback(symbol=symbol, timeframe="15m").pack()),
-            InlineKeyboardButton(text="1h", callback_data=ChartCallback(symbol=symbol, timeframe="1h").pack()),
-            InlineKeyboardButton(text="4h", callback_data=ChartCallback(symbol=symbol, timeframe="4h").pack()),
-            InlineKeyboardButton(text="1d", callback_data=ChartCallback(symbol=symbol, timeframe="1d").pack()),
+            InlineKeyboardButton(text="1m", callback_data=ChartCallback(symbol=base_symbol, timeframe="1m").pack()),
+            InlineKeyboardButton(text="15m", callback_data=ChartCallback(symbol=base_symbol, timeframe="15m").pack()),
+            InlineKeyboardButton(text="1h", callback_data=ChartCallback(symbol=base_symbol, timeframe="1h").pack()),
+            InlineKeyboardButton(text="4h", callback_data=ChartCallback(symbol=base_symbol, timeframe="4h").pack()),
+            InlineKeyboardButton(text="1d", callback_data=ChartCallback(symbol=base_symbol, timeframe="1d").pack()),
         ],
         [
             InlineKeyboardButton(text="عضویت در گروه 👥", url=url_group),
@@ -246,27 +258,23 @@ async def handle_ticker_input(message: types.Message):
     data = await fetch_price_data(symbol)
     
     if "error" in data:
-        await processing_msg.edit_text("❌ Symbol not found on SuperEx or CoinGecko.")
+        await processing_msg.edit_text("❌ Symbol not found on SuperEx or Binance.")
         return
 
-    # Formatting the caption exactly as requested
+    # Formatting the caption
     caption = (
         f"🪙 **{data['symbol']}**\n"
         f"💰 **P:** ${data['price']}\n"
         f"📉 **24h:** {data['change_24h']}%\n\n"
+        f"📈 **H:** ${data['high']}\n"
+        f"📉 **L:** ${data['low']}\n"
+        f"📊 **Vol:** {data['volume']} USDT\n"
     )
     
-    if data.get("source") == "SuperEx":
-        caption += (
-            f"📈 **H:** ${data['high']}\n"
-            f"📉 **L:** ${data['low']}\n"
-            f"📊 **Vol:** {data['volume']} USDT\n"
-        )
-    else:
-        caption += f"🌐 Source: CoinGecko Fallback\n"
+    if data.get("source") != "SuperEx":
+        caption += f"\n🌐 Source: {data['source']} Fallback"
 
     try:
-        # Generate initial 1h chart only if source is SuperEx
         if data.get("source") == "SuperEx":
             chart_bytes = await generate_chart_image(symbol, "1h")
             photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
