@@ -489,28 +489,23 @@ async def handle_ticker_input(message: types.Message):
         chart_bytes = await chart_task
         photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
 
-        # ارسال عکس و حذف پیام «در حال دریافت» هم‌زمان (نه پشت‌سرهم) انجام می‌شه.
-        # نکته‌ی مهم: متدهای aiogram (reply_photo/delete) یک شیء TelegramMethod
-        # برمی‌گردونن که awaitable هست ولی hashable نیست؛ asyncio.gather برای
-        # مدیریت داخلی‌ش نیاز به آرگومان‌های hashable داره (Task/Future).
-        # پس باید هر کدوم رو اول با create_task به یک Task واقعی تبدیل کنیم.
-        await asyncio.gather(
-            asyncio.create_task(message.reply_photo(
-                photo=photo,
-                caption=caption,
-                parse_mode="Markdown",
-                reply_markup=get_price_keyboard(symbol)
-            )),
-            asyncio.create_task(processing_msg.delete())
+        # نکته‌ی مهم: متدهای aiogram (مثل reply_photo/delete) یک شیء
+        # TelegramMethod (مثل SendPhoto) برمی‌گردونن، نه یک coroutine واقعی.
+        # این شیء awaitable هست ولی asyncio.create_task/gather فقط
+        # coroutine یا Task/Future واقعی قبول می‌کنن، در نتیجه پیچیدن این
+        # متدها با create_task یا gather خطا می‌ده. پس این دو تا فراخوانی
+        # رو ساده و پشت‌سرهم await می‌کنیم (سودِ موازی‌سازی‌شون هم ناچیز بود).
+        await message.reply_photo(
+            photo=photo,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=get_price_keyboard(symbol)
         )
+        await processing_msg.delete()
     except Exception as e:
         logging.error(f"Chart generation error: {e}")
-        await asyncio.gather(
-            asyncio.create_task(
-                message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown")
-            ),
-            asyncio.create_task(processing_msg.delete())
-        )
+        await message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown")
+        await processing_msg.delete()
 
 @dp.callback_query(ChartCallback.filter())
 async def process_chart_timeframe(query: types.CallbackQuery, callback_data: ChartCallback):
