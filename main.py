@@ -489,21 +489,27 @@ async def handle_ticker_input(message: types.Message):
         chart_bytes = await chart_task
         photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
 
-        # ارسال عکس و حذف پیام «در حال دریافت» هم‌زمان (نه پشت‌سرهم) انجام می‌شه
+        # ارسال عکس و حذف پیام «در حال دریافت» هم‌زمان (نه پشت‌سرهم) انجام می‌شه.
+        # نکته‌ی مهم: متدهای aiogram (reply_photo/delete) یک شیء TelegramMethod
+        # برمی‌گردونن که awaitable هست ولی hashable نیست؛ asyncio.gather برای
+        # مدیریت داخلی‌ش نیاز به آرگومان‌های hashable داره (Task/Future).
+        # پس باید هر کدوم رو اول با create_task به یک Task واقعی تبدیل کنیم.
         await asyncio.gather(
-            message.reply_photo(
+            asyncio.create_task(message.reply_photo(
                 photo=photo,
                 caption=caption,
                 parse_mode="Markdown",
                 reply_markup=get_price_keyboard(symbol)
-            ),
-            processing_msg.delete()
+            )),
+            asyncio.create_task(processing_msg.delete())
         )
     except Exception as e:
         logging.error(f"Chart generation error: {e}")
         await asyncio.gather(
-            message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown"),
-            processing_msg.delete()
+            asyncio.create_task(
+                message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown")
+            ),
+            asyncio.create_task(processing_msg.delete())
         )
 
 @dp.callback_query(ChartCallback.filter())
@@ -552,7 +558,13 @@ async def main():
     
     logging.info(f"🌐 Web server starting on port {PORT}")
     await site.start()
-    
+
+    # حذف هرگونه webhook فعال + دور ریختن آپدیت‌های عقب‌مانده قبل از شروع polling.
+    # این کار باعث می‌شه اگه یه نمونه‌ی قبلی از ربات (مثلاً باقی‌مونده‌ی یک
+    # دیپلوی قبلی روی Render که هنوز کامل shutdown نشده) هنوز به تلگرام
+    # وصل بود، برخورد و خطای TelegramConflictError به حداقل برسه.
+    await bot.delete_webhook(drop_pending_updates=True)
+
     # فقط update های واقعاً استفاده‌شده (پیام و کلیک روی دکمه) پردازش می‌شن؛
     # این باعث کاهش overhead پردازش update های غیرضروری در long polling می‌شه.
     logging.info("🚀 Bot polling started")
