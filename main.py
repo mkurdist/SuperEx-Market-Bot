@@ -9,8 +9,8 @@ async def get_currency_id(symbol: str) -> str:
     if base_symbol in SYMBOL_MAP_CACHE:
         return SYMBOL_MAP_CACHE[base_symbol]
         
-    # Requesting the specific currency ID from the MAIN spot market
-    url = f"https://api.superexchang.com/spot/v3/symbols?currency={base_symbol}"
+    # Requesting the currency config from the MAIN spot market (found via cURL)
+    url = "https://api.superexchang.com/spot/spot/currency/config"
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -23,13 +23,20 @@ async def get_currency_id(symbol: str) -> str:
                     logging.warning(f"🔍 RAW API RESPONSE FOR {base_symbol}: {data}")
                     
                     # Parse the response to find the correct currencyId
-                    for item in data.get("data", []):
-                        currency = str(item.get("currency", "")).upper()
-                        currency_id = str(item.get("currencyId"))
-                        
-                        if currency == base_symbol and currency_id:
-                            SYMBOL_MAP_CACHE[currency] = currency_id
-                            return currency_id
+                    # Handle both list and dict response types robustly
+                    items = data.get("data", []) if isinstance(data, dict) else data
+                    
+                    for item in items:
+                        if isinstance(item, dict):
+                            currency_raw = str(item.get("currency", "")).upper()
+                            clean_currency = currency_raw.replace("_USDT", "").replace("USDT", "")
+                            currency_id = str(item.get("currencyId", ""))
+                            
+                            # Cache every symbol we find to speed up future requests
+                            if clean_currency and currency_id and currency_id != "None":
+                                SYMBOL_MAP_CACHE[clean_currency] = currency_id
+                    
+                    return SYMBOL_MAP_CACHE.get(base_symbol)
                 else:
                     logging.error(f"SuperEx API error: Status {response.status}")
         except Exception as e:
