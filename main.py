@@ -215,7 +215,7 @@ async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
     Fetches real Kline (OHLCV) data from SuperEx WS (with Binance fallback)
-    and generates a professional candlestick chart.
+    and generates a professional candlestick chart with a custom watermark.
     """
     parsed_data = await fetch_superex_kline_ws(symbol, timeframe)
     
@@ -236,25 +236,34 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     s = mpf.make_mpf_style(marketcolors=mc, base_mpf_style='nightclouds', facecolor='#1e1e1e', edgecolor='#444444', figcolor='#121212')
 
     buf = io.BytesIO()
-    mpf.plot(
+    
+    # Capture the figure and axes to add custom elements (like text) before saving
+    fig, axlist = mpf.plot(
         df, 
         type='candle', 
         style=s, 
         volume=False, 
         title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
         tight_layout=True,
-        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+        returnfig=True  # این پارامتر اجازه می‌دهد روی چارت تغییرات دستی بدهیم
     )
+    
+    # ---------------------------------------------------------
+    # اضافه کردن امضا (Credit/Watermark) زیر چارت
+    # ---------------------------------------------------------
+    watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
+    
+    # قرار دادن متن در مرکز (0.5) و پایین (-0.05) کادر چارت
+    fig.text(0.5, -0.03, watermark_text, ha='center', va='center', fontsize=11, color='#888888')
+    
+    # Save the modified figure to the buffer
+    fig.savefig(buf, dpi=100, bbox_inches='tight', facecolor=fig.get_facecolor())
     
     buf.seek(0)
     image_bytes = buf.getvalue()
     buf.close()
     
     return image_bytes
-
-# ---------------------------------------------------------
-# Keyboards
-# ---------------------------------------------------------
 def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
     """Generates the inline keyboard for timeframes and links."""
     url_register = "https://app.superex.live/register?invitationCode=VQK2N6DDS"
