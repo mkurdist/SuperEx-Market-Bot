@@ -244,7 +244,11 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
 
     buf = io.BytesIO()
     
+    # -------------------------------------------------------------
     # Plotting with professional layout adjustments
+    # (FIX: figsize بلندتر شده تا فضای پایین برای لیبل‌های چرخیده‌ی
+    #  تاریخ و امضا کافی باشد و روی هم نیفتند)
+    # -------------------------------------------------------------
     fig, axlist = mpf.plot(
         df, 
         type='candle', 
@@ -252,19 +256,34 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
         volume=False, 
         title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
         tight_layout=False,  # غیرفعال کردن پیش‌فرض برای کنترل دقیق فضا
-        returnfig=True
+        returnfig=True,
+        figsize=(10, 6.3)
     )
     
     # تنظیم دقیق ابعاد بوم برای اینکه تاریخ‌ها و امضا هرگز با هم تداخل نکنند
-    fig.subplots_adjust(top=0.88, bottom=0.12, left=0.1, right=0.95)
+    # bottom بزرگ‌تر شده تا هم لیبل‌های چرخیده‌ی تاریخ و هم امضا جای خودشان را داشته باشند
+    fig.subplots_adjust(top=0.90, bottom=0.20, left=0.09, right=0.96)
     
     # ---------------------------------------------------------
     # امضای حرفه‌ای و تمیز (Watermark) کاملاً پایین چارت بدون تداخل
     # ---------------------------------------------------------
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
-    fig.text(0.5, 0.03, watermark_text, ha='center', va='center', fontsize=10, color='#6b7280', fontweight='medium')
+    fig.text(
+        0.5, 0.035, watermark_text,
+        ha='center', va='center', fontsize=9.5, color='#6b7280', fontweight='medium',
+        transform=fig.transFigure
+    )
     
-    fig.savefig(buf, dpi=110, bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none')
+    # FIX: دیگر از bbox_inches='tight' استفاده نمی‌کنیم چون محاسبه‌ی مجدد
+    # باندینگ‌باکس، فاصله‌ی دستی subplots_adjust را نادیده می‌گیرد و باعث
+    # تداخل امضا با تاریخ‌ها یا کات‌شدن آن می‌شود. حالا layout دستی همانطور
+    # که تنظیم شده ذخیره می‌شود.
+    fig.savefig(
+        buf, dpi=110,
+        bbox_inches=None,
+        pad_inches=0,
+        facecolor=fig.get_facecolor(), edgecolor='none'
+    )
     
     buf.seek(0)
     image_bytes = buf.getvalue()
