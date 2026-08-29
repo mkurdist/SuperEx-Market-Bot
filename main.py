@@ -93,7 +93,6 @@ async def fetch_binance_kline_fallback(symbol: str, timeframe: str) -> list:
     base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
     binance_symbol = f"{base_symbol}USDT"
     
-    # Using Binance's public data endpoint which doesn't block Cloud servers (Render)
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={timeframe}&limit=60"
     
     parsed_data = []
@@ -119,7 +118,6 @@ async def fetch_binance_kline_fallback(symbol: str, timeframe: str) -> list:
 async def fetch_price_data(symbol: str) -> dict:
     """
     Fetches the latest 24h ticker data directly using the new SuperEx resource API.
-    No currencyId mapping needed!
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     url = f"https://api.superexchang.com/resource/v3/public/currency/new?currency={base_symbol}"
@@ -150,14 +148,12 @@ async def fetch_price_data(symbol: str) -> dict:
 async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
     """
     Connects to SuperEx WebSocket, sends the kline request, decodes the GZIP/Base64 response.
-    Includes browser headers to bypass Cloudflare 200 OK blocks.
     """
     ws_url = "wss://api.superexchang.com/ws"
     tf_seconds = TIMEFRAME_MAP.get(timeframe, 3600)
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     topic = f"spot/candle{tf_seconds}:{base_symbol}_usdt"
     
-    # Headers to bypass Cloudflare WAF
     ws_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Origin": "https://www.superex.com"
@@ -166,12 +162,10 @@ async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
     parsed_data = []
     try:
         async with aiohttp.ClientSession() as session:
-            # Passing the headers to the ws_connect method
             async with session.ws_connect(ws_url, headers=ws_headers, timeout=5.0) as ws:
                 req_msg = {"op": "req", "action": "action", "args": [topic], "to": 300}
                 await ws.send_json(req_msg)
                 
-                # Listen for the response (up to 10 messages to skip pings)
                 for _ in range(10):
                     msg = await ws.receive(timeout=3.0)
                     if msg.type == aiohttp.WSMsgType.TEXT:
@@ -180,9 +174,7 @@ async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
                             continue
                         
                         try:
-                            # Fix Base64 padding if necessary
                             b64_data = msg.data + "=" * ((4 - len(msg.data) % 4) % 4)
-                            # Decode Base64 -> Decompress GZIP -> Parse JSON
                             uncompressed = gzip.decompress(base64.b64decode(b64_data)).decode('utf-8')
                             data_json = json.loads(uncompressed)
                             
@@ -214,12 +206,11 @@ async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
 
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
-    Fetches real Kline (OHLCV) data from SuperEx WS (with Binance fallback)
-    and generates a professional candlestick chart with a custom watermark.
+    Generates a professional, TradingView-style candlestick chart 
+    with high precision UI and a clean, non-overlapping SuperEx watermark.
     """
     parsed_data = await fetch_superex_kline_ws(symbol, timeframe)
     
-    # Trigger Binance fallback if WebSocket failed or returned empty
     if not parsed_data:
         logging.warning(f"SuperEx WS failed for {symbol} chart. Using Binance fallback...")
         parsed_data = await fetch_binance_kline_fallback(symbol, timeframe)
@@ -231,33 +222,49 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     df.set_index("Date", inplace=True)
     df.sort_index(inplace=True)
 
-    # Styling the chart
-    mc = mpf.make_marketcolors(up='#00ff00', down='#ff0000', edge='inherit', wick='inherit', volume='in', ohlc='i')
-    s = mpf.make_mpf_style(marketcolors=mc, base_mpf_style='nightclouds', facecolor='#1e1e1e', edgecolor='#444444', figcolor='#121212')
+    # Professional TradingView-style colors (Neon Green & Soft Red, Dark Theme)
+    mc = mpf.make_marketcolors(
+        up='#26a69a',     # تریدینگ‌ویو گرین ملایم
+        down='#ef5350',   # تریدینگ‌ویو رد ملایم
+        edge='inherit', 
+        wick='inherit', 
+        volume='in', 
+        ohlc='i'
+    )
+    
+    s = mpf.make_mpf_style(
+        marketcolors=mc, 
+        base_mpf_style='nightclouds', 
+        facecolor='#131722',  # رنگ پس‌زمینه دقیق تریدینگ‌ویو
+        edgecolor='#2a2e39',  # رنگ کادرها و مرزها
+        figcolor='#131722',
+        gridcolor='#1f2937',  # رنگ خطوط شبکه بسیار کمرنگ و شیک
+        gridstyle='--'
+    )
 
     buf = io.BytesIO()
     
-    # Capture the figure and axes to add custom elements (like text) before saving
+    # Plotting with professional layout adjustments
     fig, axlist = mpf.plot(
         df, 
         type='candle', 
         style=s, 
         volume=False, 
         title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
-        tight_layout=True,
-        returnfig=True  # این پارامتر اجازه می‌دهد روی چارت تغییرات دستی بدهیم
+        tight_layout=False,  # غیرفعال کردن پیش‌فرض برای کنترل دقیق فضا
+        returnfig=True
     )
     
+    # تنظیم دقیق ابعاد بوم برای اینکه تاریخ‌ها و امضا هرگز با هم تداخل نکنند
+    fig.subplots_adjust(top=0.88, bottom=0.12, left=0.1, right=0.95)
+    
     # ---------------------------------------------------------
-    # اضافه کردن امضا (Credit/Watermark) زیر چارت
+    # امضای حرفه‌ای و تمیز (Watermark) کاملاً پایین چارت بدون تداخل
     # ---------------------------------------------------------
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
+    fig.text(0.5, 0.03, watermark_text, ha='center', va='center', fontsize=10, color='#6b7280', fontweight='medium')
     
-    # قرار دادن متن در مرکز (0.5) و پایین (-0.05) کادر چارت
-    fig.text(0.5, -0.03, watermark_text, ha='center', va='center', fontsize=11, color='#888888')
-    
-    # Save the modified figure to the buffer
-    fig.savefig(buf, dpi=100, bbox_inches='tight', facecolor=fig.get_facecolor())
+    fig.savefig(buf, dpi=110, bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none')
     
     buf.seek(0)
     image_bytes = buf.getvalue()
@@ -296,7 +303,6 @@ async def show_all_emojis(message: types.Message):
     """
     فرمان موقت برای رندر کردن آیدی‌های نامشخص و پیدا کردن نام آن‌ها
     """
-    # لیستی از آیدی‌هایی که فرستادی
     unknown_ids = [
         "5321041614443944130", "5319019251783212762", "5204021979174157518",
         "5204367105566193797", "5203973501878286332", "5203921507004201718",
@@ -310,7 +316,6 @@ async def show_all_emojis(message: types.Message):
     text = "🔍 **لیست تشخیص ایموجی‌ها:**\n\n"
     
     for i, eid in enumerate(unknown_ids, 1):
-        # ساخت تگ HTML برای رندر ایموجی پرمیوم در تلگرام
         text += f"{i}. <tg-emoji emoji-id='{eid}'>🪙</tg-emoji> ➔ <code>{eid}</code>\n"
         
     await message.reply(text, parse_mode="HTML")
@@ -321,9 +326,7 @@ async def extract_custom_emoji(message: types.Message):
     """
     Utility handler: Catch any message (or forwarded media with caption) 
     that contains custom emojis and reply with a list of all their IDs.
-    Runs BEFORE the main ticker handler.
     """
-    # Check if the message has a caption (like a forwarded photo) or is just text
     entities = message.caption_entities if message.photo or message.document else message.entities
     full_text = message.caption if message.photo or message.document else message.text
     
@@ -335,7 +338,6 @@ async def extract_custom_emoji(message: types.Message):
                 emoji_char = full_text[entity.offset : entity.offset + entity.length]
                 entry = f"ایموجی: {emoji_char} ➔ آیدی: `{entity.custom_emoji_id}`"
                 
-                # Prevent adding duplicate emojis to the list
                 if entry not in found_emojis:
                     found_emojis.append(entry)
             
@@ -344,7 +346,6 @@ async def extract_custom_emoji(message: types.Message):
         await message.reply(response_text, parse_mode="Markdown")
         return
         
-    # If no custom emojis were found, but it looks like a valid ticker, pass it down.
     text = message.text.strip().upper() if message.text else ""
     if text.isalnum() and len(text) <= 10:
         await handle_ticker_input(message)
