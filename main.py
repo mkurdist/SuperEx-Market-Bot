@@ -264,6 +264,7 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     buf.close()
     
     return image_bytes
+
 def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
     """Generates the inline keyboard for timeframes and links."""
     url_register = "https://app.superex.live/register?invitationCode=VQK2N6DDS"
@@ -289,6 +290,32 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------
 # Message Handlers
 # ---------------------------------------------------------
+
+@dp.message(F.text == "/test_emojis")
+async def show_all_emojis(message: types.Message):
+    """
+    فرمان موقت برای رندر کردن آیدی‌های نامشخص و پیدا کردن نام آن‌ها
+    """
+    # لیستی از آیدی‌هایی که فرستادی
+    unknown_ids = [
+        "5321041614443944130", "5319019251783212762", "5204021979174157518",
+        "5204367105566193797", "5203973501878286332", "5203921507004201718",
+        "5204298115506517373", "5203997304587040556", "5206210561364210906",
+        "5204177620199027192", "5206384773827670642", "5204021042871286051",
+        "5206338061763362251", "5204004198009551074", "5206292569469760905",
+        "5204344763146320501", "5204418030993422385", "5204329022091180922",
+        "5204173131958204067", "5204241323153961416"
+    ]
+    
+    text = "🔍 **لیست تشخیص ایموجی‌ها:**\n\n"
+    
+    for i, eid in enumerate(unknown_ids, 1):
+        # ساخت تگ HTML برای رندر ایموجی پرمیوم در تلگرام
+        text += f"{i}. <tg-emoji emoji-id='{eid}'>🪙</tg-emoji> ➔ <code>{eid}</code>\n"
+        
+    await message.reply(text, parse_mode="HTML")
+
+
 @dp.message(F.entities | F.caption_entities)
 async def extract_custom_emoji(message: types.Message):
     """
