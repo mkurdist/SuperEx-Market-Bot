@@ -314,6 +314,16 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     مستقیم در event loop - وگرنه هنگام رندر، کل ربات برای همه‌ی
     کاربران دیگه هم بلاک می‌شه.
     """
+    # فرمت تاریخ محور X بر اساس تایم‌فریم:
+    # - تایم‌فریم‌های کوچک‌تر از روزانه (1m/15m/1h/4h): فقط ساعت:دقیقه، بدون تاریخ/ماه
+    # - تایم‌فریم روزانه (1d): فقط نام کوتاه ماه (مثل Feb)
+    if timeframe == "1d":
+        date_format = '%b'
+        x_rotation = 0
+    else:
+        date_format = '%H:%M'
+        x_rotation = 0
+
     fig, axlist = mpf.plot(
         df,
         type='candle',
@@ -321,12 +331,14 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
         volume=False,
         title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
         ylabel='Price (USDT)',   # لیبل محور قیمت، مطابق تصویر مرجع
+        datetime_format=date_format,
+        xrotation=x_rotation,
         tight_layout=False,
         returnfig=True,
-        figsize=(9.5, 6)
+        figsize=(12, 7.4)   # بزرگ‌تر شده تا با اندازه‌ی سایر ربات‌ها هم‌خوان باشه
     )
 
-    fig.subplots_adjust(top=0.90, bottom=0.20, left=0.10, right=0.96)
+    fig.subplots_adjust(top=0.90, bottom=0.16, left=0.09, right=0.96)
 
     # قاب/کادر نازک دور کل چارت: مطمئن می‌شیم هر ۴ لبه (spine) نمایش داده
     # بشن و رنگ یکسان داشته باشن، چون بعضی استایل‌های پایه‌ی mplfinance
@@ -339,15 +351,15 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
     fig.text(
-        0.5, 0.03, watermark_text,
-        ha='center', va='center', fontsize=9.5, color='#9a9a9a', fontweight='normal',
+        0.5, 0.025, watermark_text,
+        ha='center', va='center', fontsize=10.5, color='#9a9a9a', fontweight='normal',
         transform=fig.transFigure
     )
 
     buf = io.BytesIO()
     try:
         fig.savefig(
-            buf, dpi=110,
+            buf, dpi=130,
             bbox_inches=None, pad_inches=0,
             facecolor=fig.get_facecolor(), edgecolor='none'
         )
