@@ -12,9 +12,11 @@ import pandas as pd
 import mplfinance as mpf
 import matplotlib
 matplotlib.use('Agg') # Prevents GUI crashes on headless servers like Render
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
 
-from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
+from aiohttp import web
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.filters.callback_data import CallbackData
 from dotenv import load_dotenv
@@ -40,6 +42,71 @@ TIMEFRAME_MAP = {
 }
 
 # ---------------------------------------------------------
+# Performance: Chart rendering pool + caches
+# ---------------------------------------------------------
+# رندر چارت با matplotlib یک عملیات CPU-bound و نسبتاً سنگین است.
+# اگر مستقیم در event loop اصلی اجرا شود، کل ربات (برای همه‌ی کاربران)
+# در حین رندر یک چارت بلاک می‌شود. به همین دلیل آن را در یک
+# ThreadPoolExecutor مجزا اجرا می‌کنیم.
+CHART_RENDER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(2, (os.cpu_count() or 2)),
+    thread_name_prefix="chart-render"
+)
+
+# محدود کردن تعداد رندرهای هم‌زمان تا CPU سرور زیر بار سنگین له نشود
+# (مقدار قابل تنظیم با متغیر محیطی MAX_CONCURRENT_CHARTS)
+CHART_RENDER_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_CHARTS", "4")))
+
+# کش کوتاه‌مدت روی تصویر نهایی چارت: وقتی چند کاربر هم‌زمان همون نماد/تایم‌فریم
+# رو می‌خوان یا کاربر سریع روی دکمه‌های تایم‌فریم کلیک می‌کنه، به‌جای فراخوانی
+# مجدد وب‌ساکت + رندر مجدد، تصویر کش‌شده برگردونده می‌شه.
+CHART_CACHE_TTL = 5  # ثانیه
+CHART_CACHE: dict = {}
+
+# کش کوتاه‌مدت روی نتیجه‌ی استعلام قیمت (خود fetch_price_data دست‌نخورده می‌ماند،
+# این فقط یک لایه‌ی wrapper جلوی آن است)
+PRICE_CACHE_TTL = 3  # ثانیه
+PRICE_CACHE: dict = {}
+
+_CACHE_MAX_ENTRIES = 300  # سقف اندازه‌ی کش‌ها تا حافظه بی‌رویه رشد نکند
+
+
+def _cache_get(store: dict, key, ttl: float):
+    entry = store.get(key)
+    if entry and (time.time() - entry[0]) < ttl:
+        return entry[1]
+    return None
+
+
+def _cache_set(store: dict, key, value):
+    store[key] = (time.time(), value)
+    if len(store) > _CACHE_MAX_ENTRIES:
+        oldest_key = min(store, key=lambda k: store[k][0])
+        store.pop(oldest_key, None)
+
+
+# استایل و رنگ‌های چارت قبلاً هر بار داخل تابع رندر از نو ساخته می‌شدند؛
+# چون به هیچ ورودی وابسته نیستند، یک‌بار در سطح ماژول ساخته می‌شوند.
+_MARKET_COLORS = mpf.make_marketcolors(
+    up='#26a69a',     # تریدینگ‌ویو گرین ملایم
+    down='#ef5350',   # تریدینگ‌ویو رد ملایم
+    edge='inherit',
+    wick='inherit',
+    volume='in',
+    ohlc='i'
+)
+
+CHART_STYLE = mpf.make_mpf_style(
+    marketcolors=_MARKET_COLORS,
+    base_mpf_style='nightclouds',
+    facecolor='#131722',  # رنگ پس‌زمینه دقیق تریدینگ‌ویو
+    edgecolor='#2a2e39',  # رنگ کادرها و مرزها
+    figcolor='#131722',
+    gridcolor='#1f2937',  # رنگ خطوط شبکه بسیار کمرنگ و شیک
+    gridstyle='--'
+)
+
+# ---------------------------------------------------------
 # Callback Data Factories
 # ---------------------------------------------------------
 class ChartCallback(CallbackData, prefix="chart"):
@@ -48,7 +115,7 @@ class ChartCallback(CallbackData, prefix="chart"):
     timeframe: str
 
 # ---------------------------------------------------------
-# API Helper Functions
+# API Helper Functions (دست‌نخورده - طبق درخواست)
 # ---------------------------------------------------------
 def get_superex_headers() -> dict:
     """Generates dynamic security headers required by SuperEx API."""
@@ -204,11 +271,80 @@ async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
         
     return parsed_data
 
+# ---------------------------------------------------------
+# Cached wrappers around the exchange query methods
+# (خود متدهای بالا دست‌نخورده‌اند؛ این‌ها فقط یک لایه‌ی نازک کش جلوشون هستن)
+# ---------------------------------------------------------
+async def get_price_data_cached(symbol: str) -> dict:
+    """
+    اگر همین نماد در چند ثانیه‌ی اخیر استعلام شده باشه (مثلاً چند کاربر
+    هم‌زمان BTC رو می‌پرسن)، به‌جای زدن درخواست جدید، نتیجه‌ی کش‌شده برمی‌گرده.
+    """
+    cache_key = symbol.upper()
+    cached = _cache_get(PRICE_CACHE, cache_key, PRICE_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    data = await fetch_price_data(symbol)
+    if "error" not in data:
+        _cache_set(PRICE_CACHE, cache_key, data)
+    return data
+
+# ---------------------------------------------------------
+# Chart Generation
+# ---------------------------------------------------------
+def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
+    """
+    بخش سنگین و CPU-bound رسم چارت (matplotlib). این تابع sync است و
+    همیشه باید از طریق run_in_executor در یک ترد جدا فراخوانی بشه، نه
+    مستقیم در event loop - وگرنه هنگام رندر، کل ربات برای همه‌ی
+    کاربران دیگه هم بلاک می‌شه.
+    """
+    fig, axlist = mpf.plot(
+        df,
+        type='candle',
+        style=CHART_STYLE,
+        volume=False,
+        title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
+        tight_layout=False,
+        returnfig=True,
+        figsize=(10, 6.3)
+    )
+
+    fig.subplots_adjust(top=0.90, bottom=0.20, left=0.09, right=0.96)
+
+    watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
+    fig.text(
+        0.5, 0.035, watermark_text,
+        ha='center', va='center', fontsize=9.5, color='#6b7280', fontweight='medium',
+        transform=fig.transFigure
+    )
+
+    buf = io.BytesIO()
+    try:
+        fig.savefig(
+            buf, dpi=110,
+            bbox_inches=None, pad_inches=0,
+            facecolor=fig.get_facecolor(), edgecolor='none'
+        )
+        return buf.getvalue()
+    finally:
+        buf.close()
+        # نکته‌ی مهم: در نسخه‌ی قبلی figure ها هیچ‌وقت close نمی‌شدند،
+        # که باعث نشت حافظه‌ی تدریجی و کند شدن ربات بعد از مدتی کار می‌شد.
+        plt.close(fig)
+
+
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
     Generates a professional, TradingView-style candlestick chart 
     with high precision UI and a clean, non-overlapping SuperEx watermark.
     """
+    cache_key = (symbol.upper(), timeframe)
+    cached = _cache_get(CHART_CACHE, cache_key, CHART_CACHE_TTL)
+    if cached is not None:
+        return cached
+
     parsed_data = await fetch_superex_kline_ws(symbol, timeframe)
     
     if not parsed_data:
@@ -222,73 +358,13 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     df.set_index("Date", inplace=True)
     df.sort_index(inplace=True)
 
-    # Professional TradingView-style colors (Neon Green & Soft Red, Dark Theme)
-    mc = mpf.make_marketcolors(
-        up='#26a69a',     # تریدینگ‌ویو گرین ملایم
-        down='#ef5350',   # تریدینگ‌ویو رد ملایم
-        edge='inherit', 
-        wick='inherit', 
-        volume='in', 
-        ohlc='i'
-    )
-    
-    s = mpf.make_mpf_style(
-        marketcolors=mc, 
-        base_mpf_style='nightclouds', 
-        facecolor='#131722',  # رنگ پس‌زمینه دقیق تریدینگ‌ویو
-        edgecolor='#2a2e39',  # رنگ کادرها و مرزها
-        figcolor='#131722',
-        gridcolor='#1f2937',  # رنگ خطوط شبکه بسیار کمرنگ و شیک
-        gridstyle='--'
-    )
+    async with CHART_RENDER_SEMAPHORE:
+        loop = asyncio.get_running_loop()
+        image_bytes = await loop.run_in_executor(
+            CHART_RENDER_EXECUTOR, _render_chart_sync, df, symbol, timeframe
+        )
 
-    buf = io.BytesIO()
-    
-    # -------------------------------------------------------------
-    # Plotting with professional layout adjustments
-    # (FIX: figsize بلندتر شده تا فضای پایین برای لیبل‌های چرخیده‌ی
-    #  تاریخ و امضا کافی باشد و روی هم نیفتند)
-    # -------------------------------------------------------------
-    fig, axlist = mpf.plot(
-        df, 
-        type='candle', 
-        style=s, 
-        volume=False, 
-        title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
-        tight_layout=False,  # غیرفعال کردن پیش‌فرض برای کنترل دقیق فضا
-        returnfig=True,
-        figsize=(10, 6.3)
-    )
-    
-    # تنظیم دقیق ابعاد بوم برای اینکه تاریخ‌ها و امضا هرگز با هم تداخل نکنند
-    # bottom بزرگ‌تر شده تا هم لیبل‌های چرخیده‌ی تاریخ و هم امضا جای خودشان را داشته باشند
-    fig.subplots_adjust(top=0.90, bottom=0.20, left=0.09, right=0.96)
-    
-    # ---------------------------------------------------------
-    # امضای حرفه‌ای و تمیز (Watermark) کاملاً پایین چارت بدون تداخل
-    # ---------------------------------------------------------
-    watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
-    fig.text(
-        0.5, 0.035, watermark_text,
-        ha='center', va='center', fontsize=9.5, color='#6b7280', fontweight='medium',
-        transform=fig.transFigure
-    )
-    
-    # FIX: دیگر از bbox_inches='tight' استفاده نمی‌کنیم چون محاسبه‌ی مجدد
-    # باندینگ‌باکس، فاصله‌ی دستی subplots_adjust را نادیده می‌گیرد و باعث
-    # تداخل امضا با تاریخ‌ها یا کات‌شدن آن می‌شود. حالا layout دستی همانطور
-    # که تنظیم شده ذخیره می‌شود.
-    fig.savefig(
-        buf, dpi=110,
-        bbox_inches=None,
-        pad_inches=0,
-        facecolor=fig.get_facecolor(), edgecolor='none'
-    )
-    
-    buf.seek(0)
-    image_bytes = buf.getvalue()
-    buf.close()
-    
+    _cache_set(CHART_CACHE, cache_key, image_bytes)
     return image_bytes
 
 def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
@@ -381,10 +457,18 @@ async def handle_ticker_input(message: types.Message):
         
     symbol = text
     processing_msg = await message.reply("⏳ Fetching data...")
-    
-    data = await fetch_price_data(symbol)
-    
+
+    # نکته‌ی کلیدی سرعت: قبلاً ابتدا قیمت و بعد (کاملاً جداگانه) چارت
+    # fetch/render می‌شد -> زمان پاسخ تقریباً برابر مجموع این دو بود.
+    # حالا هر دو به‌صورت موازی شروع می‌شن و زمان پاسخ تقریباً برابر
+    # طولانی‌ترین یکی از این دو عملیات می‌شه.
+    price_task = asyncio.create_task(get_price_data_cached(symbol))
+    chart_task = asyncio.create_task(generate_chart_image(symbol, "1h"))
+
+    data = await price_task
+
     if "error" in data:
+        chart_task.cancel()
         await processing_msg.edit_text("❌ Symbol not found on SuperEx or Binance.")
         return
 
@@ -402,20 +486,25 @@ async def handle_ticker_input(message: types.Message):
         caption += f"\n🌐 Source: {data['source']} Fallback"
 
     try:
-        chart_bytes = await generate_chart_image(symbol, "1h")
+        chart_bytes = await chart_task
         photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
-        
-        await message.reply_photo(
-            photo=photo,
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=get_price_keyboard(symbol)
+
+        # ارسال عکس و حذف پیام «در حال دریافت» هم‌زمان (نه پشت‌سرهم) انجام می‌شه
+        await asyncio.gather(
+            message.reply_photo(
+                photo=photo,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=get_price_keyboard(symbol)
+            ),
+            processing_msg.delete()
         )
     except Exception as e:
         logging.error(f"Chart generation error: {e}")
-        await message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown")
-        
-    await processing_msg.delete()
+        await asyncio.gather(
+            message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown"),
+            processing_msg.delete()
+        )
 
 @dp.callback_query(ChartCallback.filter())
 async def process_chart_timeframe(query: types.CallbackQuery, callback_data: ChartCallback):
@@ -428,6 +517,8 @@ async def process_chart_timeframe(query: types.CallbackQuery, callback_data: Cha
     await query.answer(f"Loading {timeframe} chart...")
     
     try:
+        # اگر همین نماد/تایم‌فریم به‌تازگی رندر شده باشه (مثلاً کاربر
+        # سریع چند بار کلیک کنه)، از کش برمی‌گرده و تقریباً آنی جواب می‌ده.
         chart_bytes = await generate_chart_image(symbol, timeframe)
         new_photo = types.InputMediaPhoto(
             media=BufferedInputFile(chart_bytes, filename=f"{symbol}_{timeframe}.png"),
@@ -462,8 +553,13 @@ async def main():
     logging.info(f"🌐 Web server starting on port {PORT}")
     await site.start()
     
+    # فقط update های واقعاً استفاده‌شده (پیام و کلیک روی دکمه) پردازش می‌شن؛
+    # این باعث کاهش overhead پردازش update های غیرضروری در long polling می‌شه.
     logging.info("🚀 Bot polling started")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    finally:
+        CHART_RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 if __name__ == "__main__":
     try:
