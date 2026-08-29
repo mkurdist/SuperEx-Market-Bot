@@ -280,6 +280,28 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------
 # Message Handlers
 # ---------------------------------------------------------
+@dp.message(F.entities)
+async def extract_custom_emoji(message: types.Message):
+    """
+    Utility handler: Catch any message that contains a custom emoji and reply with its ID.
+    Runs BEFORE the main ticker handler to intercept emojis safely.
+    """
+    found_custom_emoji = False
+    for entity in message.entities:
+        if entity.type == "custom_emoji":
+            found_custom_emoji = True
+            emoji_char = message.text[entity.offset : entity.offset + entity.length]
+            await message.reply(
+                f"ایموجی: {emoji_char}\nآیدی: `{entity.custom_emoji_id}`", 
+                parse_mode="Markdown"
+            )
+            
+    # If the message contains no custom emojis but looks like a valid ticker (e.g. bolded "BTC"),
+    # we manually pass it down to the ticker handler.
+    text = message.text.strip().upper() if message.text else ""
+    if not found_custom_emoji and text.isalnum() and len(text) <= 10:
+        await handle_ticker_input(message)
+
 @dp.message(F.text)
 async def handle_ticker_input(message: types.Message):
     """
