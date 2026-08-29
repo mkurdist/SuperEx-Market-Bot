@@ -280,26 +280,37 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------
 # Message Handlers
 # ---------------------------------------------------------
-@dp.message(F.entities)
+@dp.message(F.entities | F.caption_entities)
 async def extract_custom_emoji(message: types.Message):
     """
-    Utility handler: Catch any message that contains a custom emoji and reply with its ID.
-    Runs BEFORE the main ticker handler to intercept emojis safely.
+    Utility handler: Catch any message (or forwarded media with caption) 
+    that contains custom emojis and reply with a list of all their IDs.
+    Runs BEFORE the main ticker handler.
     """
-    found_custom_emoji = False
-    for entity in message.entities:
-        if entity.type == "custom_emoji":
-            found_custom_emoji = True
-            emoji_char = message.text[entity.offset : entity.offset + entity.length]
-            await message.reply(
-                f"ایموجی: {emoji_char}\nآیدی: `{entity.custom_emoji_id}`", 
-                parse_mode="Markdown"
-            )
+    # Check if the message has a caption (like a forwarded photo) or is just text
+    entities = message.caption_entities if message.photo or message.document else message.entities
+    full_text = message.caption if message.photo or message.document else message.text
+    
+    found_emojis = []
+    
+    if entities and full_text:
+        for entity in entities:
+            if entity.type == "custom_emoji":
+                emoji_char = full_text[entity.offset : entity.offset + entity.length]
+                entry = f"ایموجی: {emoji_char} ➔ آیدی: `{entity.custom_emoji_id}`"
+                
+                # Prevent adding duplicate emojis to the list
+                if entry not in found_emojis:
+                    found_emojis.append(entry)
             
-    # If the message contains no custom emojis but looks like a valid ticker (e.g. bolded "BTC"),
-    # we manually pass it down to the ticker handler.
+    if found_emojis:
+        response_text = "✨ **ایموجی‌های یافت شده در این پیام:**\n\n" + "\n\n".join(found_emojis)
+        await message.reply(response_text, parse_mode="Markdown")
+        return
+        
+    # If no custom emojis were found, but it looks like a valid ticker, pass it down.
     text = message.text.strip().upper() if message.text else ""
-    if not found_custom_emoji and text.isalnum() and len(text) <= 10:
+    if text.isalnum() and len(text) <= 10:
         await handle_ticker_input(message)
 
 @dp.message(F.text)
