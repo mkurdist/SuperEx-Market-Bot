@@ -89,11 +89,12 @@ async def fetch_binance_fallback(symbol: str) -> dict:
     return {"error": "Symbol not found on SuperEx or Binance."}
 
 async def fetch_binance_kline_fallback(symbol: str, timeframe: str) -> list:
-    """Fallback to Binance API for Kline (Chart) data."""
+    """Fallback to Binance Data API for Kline (Chart) data (Bypasses US Geo-block)."""
     base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
     binance_symbol = f"{base_symbol}USDT"
     
-    url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={timeframe}&limit=60"
+    # Using Binance's public data endpoint which doesn't block Cloud servers (Render)
+    url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={timeframe}&limit=60"
     
     parsed_data = []
     async with aiohttp.ClientSession() as session:
@@ -148,18 +149,25 @@ async def fetch_price_data(symbol: str) -> dict:
 
 async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
     """
-    Connects to SuperEx WebSocket, sends the kline request, decodes the GZIP/Base64 response,
-    extracts the candles, and closes the connection.
+    Connects to SuperEx WebSocket, sends the kline request, decodes the GZIP/Base64 response.
+    Includes browser headers to bypass Cloudflare 200 OK blocks.
     """
     ws_url = "wss://api.superexchang.com/ws"
     tf_seconds = TIMEFRAME_MAP.get(timeframe, 3600)
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     topic = f"spot/candle{tf_seconds}:{base_symbol}_usdt"
     
+    # Headers to bypass Cloudflare WAF
+    ws_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://www.superex.com"
+    }
+    
     parsed_data = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(ws_url, timeout=5.0) as ws:
+            # Passing the headers to the ws_connect method
+            async with session.ws_connect(ws_url, headers=ws_headers, timeout=5.0) as ws:
                 req_msg = {"op": "req", "action": "action", "args": [topic], "to": 300}
                 await ws.send_json(req_msg)
                 
