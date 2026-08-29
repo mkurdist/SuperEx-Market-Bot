@@ -87,9 +87,12 @@ def _cache_set(store: dict, key, value):
 
 # استایل و رنگ‌های چارت قبلاً هر بار داخل تابع رندر از نو ساخته می‌شدند؛
 # چون به هیچ ورودی وابسته نیستند، یک‌بار در سطح ماژول ساخته می‌شوند.
+#
+# استایل «مشکی خالص + سبز/قرمز پررنگ + قاب نازک خاکستری» مطابق نمونه‌ی
+# مرجع (چارت بات دیگر که کاربر خواسته شبیه‌اش باشیم).
 _MARKET_COLORS = mpf.make_marketcolors(
-    up='#26a69a',     # تریدینگ‌ویو گرین ملایم
-    down='#ef5350',   # تریدینگ‌ویو رد ملایم
+    up='#00d964',      # سبز پررنگ و واضح (به‌جای تیل کم‌رنگ قبلی)
+    down='#ff3b3b',    # قرمز پررنگ و واضح
     edge='inherit',
     wick='inherit',
     volume='in',
@@ -98,12 +101,23 @@ _MARKET_COLORS = mpf.make_marketcolors(
 
 CHART_STYLE = mpf.make_mpf_style(
     marketcolors=_MARKET_COLORS,
-    base_mpf_style='nightclouds',
-    facecolor='#131722',  # رنگ پس‌زمینه دقیق تریدینگ‌ویو
-    edgecolor='#2a2e39',  # رنگ کادرها و مرزها
-    figcolor='#131722',
-    gridcolor='#1f2937',  # رنگ خطوط شبکه بسیار کمرنگ و شیک
-    gridstyle='--'
+    base_mpf_style='binance',  # پایه‌ای ساده‌تر، بدون سایه‌ها/افکت‌های اضافه‌ی nightclouds
+    facecolor='#000000',   # پس‌زمینه‌ی مشکی خالص (طبق تصویر مرجع)
+    edgecolor='#555555',   # رنگ قاب/کادر دور چارت
+    figcolor='#000000',
+    gridcolor='#222222',   # خطوط شبکه بسیار کم‌رنگ روی زمینه‌ی مشکی
+    gridstyle='--',
+    y_on_right=False,      # لیبل‌های قیمت سمت چپ، مطابق تصویر مرجع
+    rc={
+        'font.family': 'sans-serif',
+        'axes.titleweight': 'normal',   # عنوان نازک، نه بولد
+        'axes.titlesize': 13,
+        'axes.titlecolor': '#e6e6e6',
+        'axes.labelcolor': '#cfcfcf',   # رنگ لیبل «Price (USDT)»
+        'xtick.color': '#9a9a9a',
+        'ytick.color': '#9a9a9a',
+        'text.color': '#9a9a9a',        # رنگ پیش‌فرض متن (امضا هم از همینه)
+    }
 )
 
 # ---------------------------------------------------------
@@ -306,17 +320,27 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
         style=CHART_STYLE,
         volume=False,
         title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
+        ylabel='Price (USDT)',   # لیبل محور قیمت، مطابق تصویر مرجع
         tight_layout=False,
         returnfig=True,
-        figsize=(10, 6.3)
+        figsize=(9.5, 6)
     )
 
-    fig.subplots_adjust(top=0.90, bottom=0.20, left=0.09, right=0.96)
+    fig.subplots_adjust(top=0.90, bottom=0.20, left=0.10, right=0.96)
+
+    # قاب/کادر نازک دور کل چارت: مطمئن می‌شیم هر ۴ لبه (spine) نمایش داده
+    # بشن و رنگ یکسان داشته باشن، چون بعضی استایل‌های پایه‌ی mplfinance
+    # بعضی لبه‌ها رو به‌صورت پیش‌فرض مخفی می‌کنن.
+    for ax in axlist:
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color('#555555')
+            spine.set_linewidth(0.8)
 
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
     fig.text(
-        0.5, 0.035, watermark_text,
-        ha='center', va='center', fontsize=9.5, color='#6b7280', fontweight='medium',
+        0.5, 0.03, watermark_text,
+        ha='center', va='center', fontsize=9.5, color='#9a9a9a', fontweight='normal',
         transform=fig.transFigure
     )
 
