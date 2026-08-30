@@ -118,11 +118,10 @@ class ChartCallback(CallbackData, prefix="chart"):
 def get_superex_headers() -> dict:
     """
     Generates dynamic security headers required by SuperEx API.
-    Added 'language' and 'application/json' for REST API compatibility.
     """
     return {
-        "accept": "application/json",
-        "language": "en",
+        "accept": "*/*",
+        "accept-language": "en",
         "client": "1",
         "nonce": uuid.uuid4().hex,
         "timestamp": str(int(time.time() * 1000)),
@@ -132,8 +131,7 @@ def get_superex_headers() -> dict:
 
 async def fetch_price_data(symbol: str) -> dict:
     """
-    Fetches the latest 24h ticker data directly using the new SuperEx resource API.
-    No external fallbacks are used.
+    Fetches the latest 24h ticker data directly using the SuperEx resource API.
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     url = f"https://api.superexchang.com/resource/v3/public/currency/new?currency={base_symbol}"
@@ -161,95 +159,62 @@ async def fetch_price_data(symbol: str) -> dict:
     logging.warning(f"Symbol {symbol} not found on SuperEx.")
     return {"error": "Symbol not found on SuperEx."}
 
-async def get_currency_id(symbol: str) -> int:
+async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
     """
-    Fetches the internal currencyId for a given symbol from SuperEx.
-    Uses a robust multi-key search to prevent JSON parsing errors.
+    Connects to SuperEx WebSocket, sends the kline request, decodes the GZIP/Base64 response.
     """
-    base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
-    url = f"https://api.superexchang.com/api/free-spot/v3/symbols?currency={base_symbol}"
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=get_superex_headers(), timeout=5.0) as response:
-                if response.status == 200:
-                    res_json = await response.json()
-                    data = res_json.get("data")
-                    
-                    # 1. Locate the actual list of items
-                    items = []
-                    if isinstance(data, list):
-                        items = data
-                    elif isinstance(data, dict):
-                        # Try to find the list in common nested keys
-                        for key in ["list", "items", "rows", "data"]:
-                            if isinstance(data.get(key), list):
-                                items = data[key]
-                                break
-                    
-                    # 2. Iterate through items and find the matching currency
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        
-                        # Check multiple possible keys for the symbol name
-                        candidates = [
-                            str(item.get("currency", "")),
-                            str(item.get("currencyName", "")),
-                            str(item.get("name", "")),
-                            str(item.get("symbol", ""))
-                        ]
-                        
-                        for candidate in candidates:
-                            if candidate.lower() == base_symbol:
-                                cid = item.get("currencyId")
-                                if cid is not None:
-                                    return int(cid)
-                                    
-                    # 3. Log a snippet of the response if the symbol is not found for debugging
-                    logging.warning(f"Symbol {base_symbol} not found in parsed items. Raw data snippet: {str(data)[:200]}")
-        except Exception as e:
-            logging.error(f"Error fetching currencyId: {e}")
-            
-    return 0
-
-async def fetch_superex_kline_rest(symbol: str, timeframe: str) -> list:
-    """
-    Fetches Kline data via SuperEx official REST API.
-    Replaces the unstable WebSocket approach without using any external fallbacks.
-    """
-    base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
-    currency_id = await get_currency_id(base_symbol)
-    
-    if not currency_id:
-        logging.error(f"Could not find currencyId for {base_symbol}")
-        return []
-        
+    ws_url = "wss://api.superexchang.com/ws"
     tf_seconds = TIMEFRAME_MAP.get(timeframe, 3600)
-    url = f"https://api.superexchang.com/api/free-spot/v3/klines?currencyId={currency_id}&timeType={tf_seconds}&limit=60"
+    base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
+    topic = f"spot/candle{tf_seconds}:{base_symbol}_usdt"
+    
+    ws_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://www.superex.com"
+    }
     
     parsed_data = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=get_superex_headers(), timeout=5.0) as response:
-                if response.status == 200:
-                    res_json = await response.json()
-                    klines = res_json.get("data", [])
-                    
-                    # Data format: timestamp, high, open, low, close, volume
-                    for item in klines:
-                        if isinstance(item, list) and len(item) >= 6:
-                            t, h, o, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
-                            parsed_data.append({
-                                "Date": pd.to_datetime(int(t), unit="ms"),
-                                "Open": float(o),
-                                "High": float(h),
-                                "Low": float(l),
-                                "Close": float(c),
-                                "Volume": float(v)
-                            })
+            async with session.ws_connect(ws_url, headers=ws_headers, timeout=5.0) as ws:
+                req_msg = {"op": "req", "action": "action", "args": [topic], "to": 300}
+                await ws.send_json(req_msg)
+                
+                for _ in range(10):
+                    msg = await ws.receive(timeout=3.0)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        if msg.data == 'ping':
+                            await ws.send_str('pong')
+                            continue
+                        
+                        try:
+                            b64_data = msg.data + "=" * ((4 - len(msg.data) % 4) % 4)
+                            uncompressed = gzip.decompress(base64.b64decode(b64_data)).decode('utf-8')
+                            data_json = json.loads(uncompressed)
+                            
+                            if data_json.get("action") == "action":
+                                klines = data_json.get("data", [])
+                                for item in klines:
+                                    if isinstance(item, dict):
+                                        t = item.get("time", 0)
+                                        o = item.get("open", 0)
+                                        h = item.get("high", 0)
+                                        l = item.get("low", 0)
+                                        c = item.get("close", 0)
+                                        v = item.get("volume", 0)
+                                        
+                                        parsed_data.append({
+                                            "Date": pd.to_datetime(int(t), unit="ms"),
+                                            "Open": float(o), "High": float(h),
+                                            "Low": float(l), "Close": float(c),
+                                            "Volume": float(v)
+                                        })
+                                if parsed_data:
+                                    return parsed_data
+                        except Exception:
+                            pass
     except Exception as e:
-        logging.error(f"SuperEx REST Kline error: {e}")
+        logging.error(f"SuperEx WS Kline error: {e}")
         
     return parsed_data
 
@@ -258,7 +223,7 @@ async def fetch_superex_kline_rest(symbol: str, timeframe: str) -> list:
 # ---------------------------------------------------------
 async def get_price_data_cached(symbol: str) -> dict:
     """
-    اگر همین نماد در چند ثانیه‌ی اخیر استعلام شده باشه، از کش برمی‌گرده.
+    Returns cached price data if available within TTL.
     """
     cache_key = symbol.upper()
     cached = _cache_get(PRICE_CACHE, cache_key, PRICE_CACHE_TTL)
@@ -275,7 +240,7 @@ async def get_price_data_cached(symbol: str) -> dict:
 # ---------------------------------------------------------
 def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     """
-    بخش سنگین و CPU-bound رسم چارت (matplotlib).
+    Renders the candlestick chart synchronously inside a thread pool.
     """
     if timeframe == "1d":
         date_format = '%b'
@@ -328,18 +293,17 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
-    Generates a professional, TradingView-style candlestick chart.
+    Generates a professional, TradingView-style candlestick chart using WebSocket data.
     """
     cache_key = (symbol.upper(), timeframe)
     cached = _cache_get(CHART_CACHE, cache_key, CHART_CACHE_TTL)
     if cached is not None:
         return cached
 
-    # Use REST API instead of WebSocket
-    parsed_data = await fetch_superex_kline_rest(symbol, timeframe)
+    parsed_data = await fetch_superex_kline_ws(symbol, timeframe)
     
     if not parsed_data:
-        raise ValueError("No chart data available from SuperEx.")
+        raise ValueError("No chart data available from SuperEx WebSocket.")
 
     df = pd.DataFrame(parsed_data)
     df.set_index("Date", inplace=True)
@@ -383,7 +347,7 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
 @dp.message(F.text == "/test_emojis")
 async def show_all_emojis(message: types.Message):
     """
-    فرمان موقت برای رندر کردن آیدی‌های نامشخص و پیدا کردن نام آن‌ها
+    Temporary command to render custom emojis and find their IDs.
     """
     unknown_ids = [
         "5321041614443944130", "5319019251783212762", "5204021979174157518",
@@ -406,8 +370,7 @@ async def show_all_emojis(message: types.Message):
 @dp.message(F.entities | F.caption_entities)
 async def extract_custom_emoji(message: types.Message):
     """
-    Utility handler: Catch any message (or forwarded media with caption) 
-    that contains custom emojis and reply with a list of all their IDs.
+    Utility handler to extract custom emoji IDs from incoming messages.
     """
     entities = message.caption_entities if message.photo or message.document else message.entities
     full_text = message.caption if message.photo or message.document else message.text
@@ -435,7 +398,7 @@ async def extract_custom_emoji(message: types.Message):
 @dp.message(F.text)
 async def handle_ticker_input(message: types.Message):
     """
-    Listens to any text message. Treats short, alphanumeric text as a crypto ticker.
+    Listens to any text message and processes short alphanumeric text as a crypto ticker.
     """
     text = message.text.strip().upper()
     
@@ -455,7 +418,6 @@ async def handle_ticker_input(message: types.Message):
         await processing_msg.edit_text("❌ Symbol not found on SuperEx.")
         return
 
-    # Formatting the caption
     caption = (
         f"🪙 **{data['symbol']}**\n"
         f"💰 **P:** ${data['price']}\n"
@@ -484,7 +446,7 @@ async def handle_ticker_input(message: types.Message):
 @dp.callback_query(ChartCallback.filter())
 async def process_chart_timeframe(query: types.CallbackQuery, callback_data: ChartCallback):
     """
-    Handles inline button clicks to change the chart timeframe.
+    Handles inline button clicks to update chart timeframes.
     """
     symbol = callback_data.symbol
     timeframe = callback_data.timeframe
