@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # آیدی عددی چت خصوصی ادمین در تلگرام، برای دریافت گزارش خطا
 
 logging.basicConfig(level=logging.INFO)
 
@@ -130,6 +131,42 @@ class ChartCallback(CallbackData, prefix="chart"):
     timeframe: str
 
 # ---------------------------------------------------------
+# گزارش خطا به ادمین (جایگزین فالبک بایننس)
+# ---------------------------------------------------------
+# دیگه هیچ فالبکی به بایننس نداریم؛ اگه SuperEx جواب نده، به‌جای نمایش دیتای
+# صرافی دیگه، یه گزارش خطا مستقیم به پیوی ادمین فرستاده می‌شه تا در جریان
+# قطعی/مشکل SuperEx قرار بگیره. یه کول‌داون ساده هم هست تا اگه SuperEx برای
+# مدتی طولانی قطع بود، ادمین رو با ده‌ها پیام تکراری اسپم نکنیم.
+ADMIN_ALERT_COOLDOWN_SECONDS = 300  # حداکثر یک بار در هر ۵ دقیقه به‌ازای هر نوع خطا
+_admin_alert_last_sent: dict = {}
+
+
+async def notify_admin_error(error_key: str, message: str) -> None:
+    """
+    ارسال گزارش خطا به پیوی ادمین. error_key برای گروه‌بندی خطاهای مشابه
+    و اعمال کول‌داون استفاده می‌شه (مثلاً 'superex_price' یا 'superex_chart').
+    """
+    if not ADMIN_CHAT_ID:
+        logging.warning("ADMIN_CHAT_ID تنظیم نشده؛ گزارش خطا فقط در لاگ ثبت می‌شود.")
+        return
+
+    now = time.time()
+    last_sent = _admin_alert_last_sent.get(error_key, 0)
+    if (now - last_sent) < ADMIN_ALERT_COOLDOWN_SECONDS:
+        return  # هنوز توی بازه‌ی کول‌داونیم، دوباره اسپم نکن
+
+    _admin_alert_last_sent[error_key] = now
+    try:
+        await bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"⚠️ **گزارش خطای SuperEx**\n\n`{error_key}`\n\n{message}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logging.error(f"ارسال گزارش خطا به ادمین ناموفق بود: {e}")
+
+
+# ---------------------------------------------------------
 # API Helper Functions (دست‌نخورده - طبق درخواست)
 # ---------------------------------------------------------
 def get_superex_headers() -> dict:
@@ -143,59 +180,6 @@ def get_superex_headers() -> dict:
         "token": "",
         "content-type": "application/x-www-form-urlencoded"
     }
-
-async def fetch_binance_fallback(symbol: str) -> dict:
-    """Fallback to Binance API for 24h Ticker."""
-    base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
-    binance_symbol = f"{base_symbol}USDT"
-    
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={binance_symbol}"
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return {
-                        "symbol": base_symbol,
-                        "price": data.get("lastPrice", "0.0"),
-                        "change_24h": data.get("priceChangePercent", "0.0"),
-                        "high": data.get("highPrice", "0.0"),
-                        "low": data.get("lowPrice", "0.0"),
-                        "volume": data.get("quoteVolume", "0.0"),
-                        "source": "Binance"
-                    }
-        except Exception as e:
-            logging.error(f"Binance ticker fallback error: {e}")
-            
-    return {"error": "Symbol not found on SuperEx or Binance."}
-
-async def fetch_binance_kline_fallback(symbol: str, timeframe: str) -> list:
-    """Fallback to Binance Data API for Kline (Chart) data (Bypasses US Geo-block)."""
-    base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
-    binance_symbol = f"{base_symbol}USDT"
-    
-    url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={timeframe}&limit=60"
-    
-    parsed_data = []
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    for item in data:
-                        parsed_data.append({
-                            "Date": pd.to_datetime(int(item[0]), unit="ms"),
-                            "Open": float(item[1]),
-                            "High": float(item[2]),
-                            "Low": float(item[3]),
-                            "Close": float(item[4]),
-                            "Volume": float(item[5])
-                        })
-        except Exception as e:
-            logging.error(f"Binance kline fallback error: {e}")
-            
-    return parsed_data
 
 async def fetch_price_data(symbol: str) -> dict:
     """
@@ -223,9 +207,21 @@ async def fetch_price_data(symbol: str) -> dict:
                         }
         except Exception as e:
             logging.error(f"Error fetching ticker for {symbol}: {e}")
-            
-    logging.warning(f"Symbol {symbol} not found on SuperEx. Trying Binance fallback...")
-    return await fetch_binance_fallback(symbol)
+            # دیگه فالبک به بایننس نداریم؛ به‌جاش گزارش خطا برای ادمین ارسال می‌شه
+            await notify_admin_error(
+                "superex_price_exception",
+                f"خطا در دریافت قیمت `{symbol}` از SuperEx:\n`{e}`"
+            )
+            return {"error": "دریافت قیمت از SuperEx با خطا مواجه شد."}
+
+    # وقتی SuperEx بدون exception ولی بدون داده‌ی معتبر جواب داده (مثلاً نماد نامعتبر
+    # یا newPrice خالی)
+    logging.warning(f"Symbol {symbol} not found on SuperEx.")
+    await notify_admin_error(
+        "superex_price_not_found",
+        f"نماد `{symbol}` روی SuperEx پیدا نشد یا داده‌ی معتبری برنگشت."
+    )
+    return {"error": "ارز موردنظر روی SuperEx پیدا نشد."}
 
 async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
     """
@@ -423,13 +419,16 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
         return cached
 
     parsed_data = await fetch_superex_kline_ws(symbol, timeframe)
-    
-    if not parsed_data:
-        logging.warning(f"SuperEx WS failed for {symbol} chart. Using Binance fallback...")
-        parsed_data = await fetch_binance_kline_fallback(symbol, timeframe)
 
     if not parsed_data:
-        raise ValueError("No chart data available from any source.")
+        # دیگه فالبک به بایننس نداریم؛ فقط گزارش خطا برای ادمین + بالا بردن exception
+        # تا کاربر پیام «چارت در دسترس نیست» رو ببینه.
+        logging.warning(f"SuperEx WS failed for {symbol} chart, timeframe={timeframe}.")
+        await notify_admin_error(
+            "superex_chart_no_data",
+            f"دریافت دیتای چارت `{symbol}` (تایم‌فریم `{timeframe}`) از SuperEx WS ناموفق بود."
+        )
+        raise ValueError("چارت SuperEx در دسترس نیست.")
 
     df = pd.DataFrame(parsed_data)
     df.set_index("Date", inplace=True)
@@ -546,7 +545,7 @@ async def handle_ticker_input(message: types.Message):
 
     if "error" in data:
         chart_task.cancel()
-        await processing_msg.edit_text("❌ Symbol not found on SuperEx or Binance.")
+        await processing_msg.edit_text(f"❌ {data['error']}")
         return
 
     # Formatting the caption
@@ -558,9 +557,7 @@ async def handle_ticker_input(message: types.Message):
         f"📉 **L:** ${data['low']}\n"
         f"📊 **Vol:** {data['volume']} USDT\n"
     )
-    
-    if data.get("source") != "SuperEx":
-        caption += f"\n🌐 Source: {data['source']} Fallback"
+    # دیگه منبع دیگه‌ای جز SuperEx نداریم، پس خط «Source: ... Fallback» هم حذف شد.
 
     try:
         chart_bytes = await chart_task
