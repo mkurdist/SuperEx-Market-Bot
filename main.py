@@ -161,7 +161,7 @@ async def fetch_price_data(symbol: str) -> dict:
 
 async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
     """
-    Fetches real candlestick (OHLCV) data directly using SuperEx public resource REST API.
+    Fetches real candlestick (OHLCV) data using SuperEx spot REST API.
     Bypasses WebSocket cloud restrictions on Render.
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
@@ -175,7 +175,7 @@ async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
     }
     resolution = tf_map.get(timeframe, "1hour")
     
-    url = f"https://api.superexchang.com/resource/v3/public/kline?symbol={base_symbol}_usdt&resolution={resolution}&limit=60"
+    url = f"https://api.superexchang.com/spot/spot/kline?symbol={base_symbol}_usdt&resolution={resolution}&limit=60"
     
     parsed_data = []
     async with aiohttp.ClientSession() as session:
@@ -185,9 +185,12 @@ async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
                     res_json = await response.json()
                     items = res_json.get("data", [])
                     
+                    if not items and isinstance(res_json, list):
+                        items = res_json
+                        
                     for item in items:
                         if isinstance(item, dict):
-                            t = item.get("time", item.get("t", 0))
+                            t = item.get("time", item.get("t", item.get("timestamp", 0)))
                             o = item.get("open", item.get("o", 0))
                             h = item.get("high", item.get("h", 0))
                             l = item.get("low", item.get("l", 0))
