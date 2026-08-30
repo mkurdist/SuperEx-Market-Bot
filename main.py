@@ -4,44 +4,45 @@ import json
 import logging
 import os
 import time
-import uuid
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from typing import Any, Optional
+from typing import Optional
 
 import aiohttp
 import pandas as pd
-import mplfinance as mpf
-import matplotlib
 
+import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import mplfinance as mpf
 
 from PIL import Image, ImageChops
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.exceptions import TelegramConflictError
-from aiogram.filters.callback_data import CallbackData
 from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    CallbackQuery,
 )
+
 from aiohttp import web
 from dotenv import load_dotenv
 
 
 # ============================================================
-# CONFIG
+# ENV
 # ============================================================
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(
+    os.getenv("PORT", "10000")
+)
 
 ADMIN_CHAT_ID = int(
     os.getenv("ADMIN_CHAT_ID", "0")
@@ -49,16 +50,16 @@ ADMIN_CHAT_ID = int(
 
 SUPEREX_API_BASE = os.getenv(
     "SUPEREX_API_BASE",
-    "https://api.superexchang.com"
+    "https://api.superexchang.com",
 ).rstrip("/")
 
 
-# ------------------------------------------------------------
-# Render / networking
-# ------------------------------------------------------------
+# ============================================================
+# CONFIG
+# ============================================================
 
 HTTP_TIMEOUT = float(
-    os.getenv("HTTP_TIMEOUT", "12")
+    os.getenv("HTTP_TIMEOUT", "15")
 )
 
 HTTP_RETRIES = int(
@@ -69,38 +70,27 @@ KLINE_LIMIT = int(
     os.getenv("KLINE_LIMIT", "100")
 )
 
-
-# ------------------------------------------------------------
-# Cache
-# ------------------------------------------------------------
-
 PRICE_CACHE_TTL = float(
     os.getenv("PRICE_CACHE_TTL", "3")
 )
 
 CHART_CACHE_TTL = float(
-    os.getenv("CHART_CACHE_TTL", "5")
+    os.getenv("CHART_CACHE_TTL", "10")
 )
-
-CACHE_MAX_ENTRIES = int(
-    os.getenv("CACHE_MAX_ENTRIES", "300")
-)
-
-
-# ------------------------------------------------------------
-# Chart rendering
-# ------------------------------------------------------------
 
 MAX_CONCURRENT_CHARTS = int(
     os.getenv("MAX_CONCURRENT_CHARTS", "2")
 )
 
 CHART_RENDER_WORKERS = int(
-    os.getenv(
-        "CHART_RENDER_WORKERS",
-        str(max(2, min(4, os.cpu_count() or 2)))
-    )
+    os.getenv("CHART_RENDER_WORKERS", "2")
 )
+
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN is not configured."
+    )
 
 
 # ============================================================
@@ -117,63 +107,55 @@ logging.basicConfig(
     ),
 )
 
-logger = logging.getLogger("superex-bot")
-
-
-# ============================================================
-# VALIDATION
-# ============================================================
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN is not configured."
-    )
+logger = logging.getLogger(
+    "superex-market-bot"
+)
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(
+    token=BOT_TOKEN
+)
+
 dp = Dispatcher()
 
 
 # ============================================================
-# HTTP SESSION
+# HTTP
 # ============================================================
 
-HTTP_SESSION: Optional[aiohttp.ClientSession] = None
+http_session: Optional[
+    aiohttp.ClientSession
+] = None
 
 
 # ============================================================
 # TIMEFRAMES
 # ============================================================
 
-TIMEFRAME_MAP = {
-    "1m": "1min",
-    "15m": "15min",
-    "1h": "1hour",
-    "4h": "4hour",
-    "1d": "1day",
-}
-
-
 TIMEFRAME_SECONDS = {
+
     "1m": 60,
+
+    "5m": 300,
+
     "15m": 900,
+
+    "30m": 1800,
+
     "1h": 3600,
+
     "4h": 14400,
+
+    "12h": 43200,
+
     "1d": 86400,
+
+    "1w": 604800,
 }
-
-
-# ============================================================
-# CALLBACK
-# ============================================================
-
-class ChartCallback(CallbackData, prefix="chart"):
-    symbol: str
-    timeframe: str
 
 
 # ============================================================
@@ -181,96 +163,94 @@ class ChartCallback(CallbackData, prefix="chart"):
 # ============================================================
 
 PRICE_CACHE = {}
+
 CHART_CACHE = {}
+
+CURRENCY_ID_CACHE = {}
 
 CACHE_LOCK = asyncio.Lock()
 
 
-def cache_get(
-    store: dict,
-    key: Any,
-    ttl: float,
+# ============================================================
+# CHART LOCKS
+# ============================================================
+
+KLINE_LOCKS = {}
+
+
+def get_kline_lock(
+    symbol: str,
+    timeframe: str,
 ):
-    entry = store.get(key)
 
-    if not entry:
-        return None
-
-    timestamp, value = entry
-
-    if time.monotonic() - timestamp >= ttl:
-        store.pop(key, None)
-        return None
-
-    return value
-
-
-def cache_set(
-    store: dict,
-    key: Any,
-    value: Any,
-):
-    store[key] = (
-        time.monotonic(),
-        value,
+    key = (
+        symbol,
+        timeframe,
     )
 
-    if len(store) > CACHE_MAX_ENTRIES:
+    if key not in KLINE_LOCKS:
 
-        oldest_key = min(
-            store,
-            key=lambda k: store[k][0],
+        KLINE_LOCKS[key] = (
+            asyncio.Lock()
         )
 
-        store.pop(
-            oldest_key,
-            None,
-        )
+    return KLINE_LOCKS[key]
 
 
 # ============================================================
-# IN-FLIGHT REQUEST CONTROL
+# CHART THREAD POOL
 # ============================================================
 
-KLINE_LOCKS = defaultdict(asyncio.Lock)
+CHART_EXECUTOR = (
+    ThreadPoolExecutor(
+        max_workers=CHART_RENDER_WORKERS,
+        thread_name_prefix="chart",
+    )
+)
+
+CHART_SEMAPHORE = asyncio.Semaphore(
+    MAX_CONCURRENT_CHARTS
+)
 
 
 # ============================================================
 # ADMIN ALERT
 # ============================================================
 
+ADMIN_ALERT_LAST = {}
+
 ADMIN_ALERT_COOLDOWN = 300
 
-_admin_alert_last_sent = {}
 
-
-async def notify_admin_error(
-    error_key: str,
+async def notify_admin(
+    error_type: str,
     message: str,
 ):
 
     if not ADMIN_CHAT_ID:
-        logger.warning(
-            "ADMIN_CHAT_ID is not configured."
-        )
         return
 
     now = time.monotonic()
 
-    last = _admin_alert_last_sent.get(
-        error_key,
+    last = ADMIN_ALERT_LAST.get(
+        error_type,
         0,
     )
 
-    if now - last < ADMIN_ALERT_COOLDOWN:
+    if (
+        now - last
+        < ADMIN_ALERT_COOLDOWN
+    ):
         return
 
-    _admin_alert_last_sent[error_key] = now
+    ADMIN_ALERT_LAST[
+        error_type
+    ] = now
 
     text = (
         "⚠️ SuperEx Bot Error\n\n"
-        f"Type: {error_key}\n\n"
-        f"{message}"
+        f"Type: {error_type}\n\n"
+        f"{message[:3500]}"
     )
 
     try:
@@ -283,7 +263,7 @@ async def notify_admin_error(
     except Exception as exc:
 
         logger.error(
-            "Failed to notify admin: %s",
+            "Admin notification failed: %r",
             exc,
         )
 
@@ -292,35 +272,37 @@ async def notify_admin_error(
 # SUPEREX HEADERS
 # ============================================================
 
-def get_superex_headers() -> dict:
+def superex_headers():
 
     return {
-        "accept": "*/*",
-        "accept-language": "en-US,en;q=0.9",
-        "client": "1",
-        "nonce": uuid.uuid4().hex,
-        "timestamp": str(
-            int(time.time() * 1000)
-        ),
-        "token": "",
-        "content-type":
-            "application/x-www-form-urlencoded",
-        "user-agent":
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/151.0.0.0 Safari/537.36",
+
+        "Accept": "*/*",
+
+        "Accept-Language":
+            "en-US,en;q=0.9",
+
+        "User-Agent":
+            (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/151.0.0.0 "
+                "Safari/537.36"
+            ),
+
+        "Connection":
+            "keep-alive",
     }
 
 
 # ============================================================
-# HTTP SESSION MANAGEMENT
+# HTTP SESSION CREATE
 # ============================================================
 
 async def create_http_session():
 
-    global HTTP_SESSION
+    global http_session
 
     timeout = aiohttp.ClientTimeout(
         total=HTTP_TIMEOUT,
@@ -334,12 +316,11 @@ async def create_http_session():
         enable_cleanup_closed=True,
     )
 
-    HTTP_SESSION = aiohttp.ClientSession(
-        timeout=timeout,
-        connector=connector,
-        headers={
-            "accept": "*/*",
-        },
+    http_session = (
+        aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector,
+        )
     )
 
     logger.info(
@@ -347,15 +328,21 @@ async def create_http_session():
     )
 
 
+# ============================================================
+# HTTP SESSION CLOSE
+# ============================================================
+
 async def close_http_session():
 
-    global HTTP_SESSION
+    global http_session
 
-    if HTTP_SESSION:
+    if http_session:
 
-        await HTTP_SESSION.close()
+        with suppress(Exception):
 
-        HTTP_SESSION = None
+            await http_session.close()
+
+        http_session = None
 
         logger.info(
             "SuperEx HTTP session closed"
@@ -363,374 +350,95 @@ async def close_http_session():
 
 
 # ============================================================
-# SYMBOL NORMALIZATION
+# NORMALIZE SYMBOL
 # ============================================================
 
-def normalize_symbol(symbol: str) -> str:
+def normalize_symbol(
+    symbol: str,
+) -> str:
 
     symbol = (
         str(symbol)
         .strip()
         .upper()
-        .replace("-", "")
         .replace("/", "")
+        .replace("-", "")
+        .replace("_", "")
         .replace(" ", "")
     )
 
-    if symbol.endswith("_USDT"):
-        symbol = symbol[:-5]
-
     if symbol.endswith("USDT"):
+
         symbol = symbol[:-4]
 
     return symbol
 
 
-def superex_symbol(symbol: str) -> str:
-
-    return (
-        normalize_symbol(symbol)
-        .lower()
-        + "_usdt"
-    )
-
-
 # ============================================================
-# NUMBER PARSER
+# CACHE GET
 # ============================================================
 
-def to_float(value: Any) -> Optional[float]:
+def cache_get(
+    cache,
+    key,
+    ttl,
+):
+
+    value = cache.get(key)
 
     if value is None:
         return None
 
-    if isinstance(value, bool):
-        return None
+    timestamp, data = value
 
-    try:
-
-        result = float(value)
-
-        if pd.isna(result):
-            return None
-
-        return result
-
-    except (
-        TypeError,
-        ValueError,
+    if (
+        time.monotonic()
+        - timestamp
+        > ttl
     ):
+
+        cache.pop(
+            key,
+            None,
+        )
+
         return None
+
+    return data
 
 
 # ============================================================
-# TIMESTAMP PARSER
+# CACHE SET
 # ============================================================
 
-def timestamp_to_datetime(
-    timestamp: Any,
-) -> Optional[pd.Timestamp]:
+def cache_set(
+    cache,
+    key,
+    value,
+    max_entries=300,
+):
 
-    try:
-
-        value = float(timestamp)
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return None
-
-    if value <= 0:
-        return None
-
-    # seconds
-    if value < 10_000_000_000:
-
-        return pd.to_datetime(
-            int(value),
-            unit="s",
-            utc=True,
-        )
-
-    # milliseconds
-    if value < 10_000_000_000_000:
-
-        return pd.to_datetime(
-            int(value),
-            unit="ms",
-            utc=True,
-        )
-
-    # microseconds
-    if value < 10_000_000_000_000_000:
-
-        return pd.to_datetime(
-            int(value),
-            unit="us",
-            utc=True,
-        )
-
-    # nanoseconds
-    return pd.to_datetime(
-        int(value),
-        unit="ns",
-        utc=True,
+    cache[key] = (
+        time.monotonic(),
+        value,
     )
 
+    if len(cache) > max_entries:
 
-# ============================================================
-# JSON EXTRACTION
-# ============================================================
+        oldest_key = min(
+            cache,
+            key=lambda k:
+                cache[k][0],
+        )
 
-def extract_kline_container(
-    payload: Any,
-) -> list:
-
-    if payload is None:
-        return []
-
-    # --------------------------------------------------------
-    # Direct list
-    # --------------------------------------------------------
-
-    if isinstance(payload, list):
-        return payload
-
-    # --------------------------------------------------------
-    # Recursive dictionary search
-    # --------------------------------------------------------
-
-    if isinstance(payload, dict):
-
-        preferred_keys = [
-            "data",
-            "rows",
-            "list",
-            "result",
-            "records",
-            "items",
-            "klines",
-            "candles",
-            "kline",
-        ]
-
-        for key in preferred_keys:
-
-            value = payload.get(key)
-
-            if isinstance(value, list):
-
-                return value
-
-            if isinstance(value, dict):
-
-                nested = extract_kline_container(
-                    value
-                )
-
-                if nested:
-                    return nested
-
-        # Search recursively
-        for value in payload.values():
-
-            if isinstance(value, dict):
-
-                nested = extract_kline_container(
-                    value
-                )
-
-                if nested:
-                    return nested
-
-            elif isinstance(value, list):
-
-                if value and any(
-                    isinstance(x, (list, dict))
-                    for x in value
-                ):
-                    return value
-
-    return []
+        cache.pop(
+            oldest_key,
+            None,
+        )
 
 
 # ============================================================
-# SINGLE KLINE PARSER
-# ============================================================
-
-def parse_kline_item(
-    item: Any,
-) -> Optional[dict]:
-
-    # --------------------------------------------------------
-    # Dictionary format
-    # --------------------------------------------------------
-
-    if isinstance(item, dict):
-
-        timestamp = (
-            item.get("time")
-            or item.get("timestamp")
-            or item.get("ts")
-            or item.get("t")
-            or item.get("date")
-            or item.get("id")
-        )
-
-        open_price = (
-            item.get("open")
-            if item.get("open") is not None
-            else item.get("o")
-        )
-
-        high_price = (
-            item.get("high")
-            if item.get("high") is not None
-            else item.get("h")
-        )
-
-        low_price = (
-            item.get("low")
-            if item.get("low") is not None
-            else item.get("l")
-        )
-
-        close_price = (
-            item.get("close")
-            if item.get("close") is not None
-            else item.get("c")
-        )
-
-        volume = (
-            item.get("volume")
-            if item.get("volume") is not None
-            else item.get("v", 0)
-        )
-
-    # --------------------------------------------------------
-    # Array format
-    # --------------------------------------------------------
-
-    elif isinstance(item, (list, tuple)):
-
-        if len(item) < 6:
-            return None
-
-        timestamp = item[0]
-
-        open_price = item[1]
-
-        high_price = item[2]
-
-        low_price = item[3]
-
-        close_price = item[4]
-
-        volume = item[5]
-
-    else:
-        return None
-
-    dt = timestamp_to_datetime(
-        timestamp
-    )
-
-    if dt is None:
-        return None
-
-    o = to_float(open_price)
-    h = to_float(high_price)
-    l = to_float(low_price)
-    c = to_float(close_price)
-    v = to_float(volume)
-
-    if None in (
-        o,
-        h,
-        l,
-        c,
-    ):
-        return None
-
-    if h <= 0 or l <= 0:
-        return None
-
-    return {
-        "Date": dt,
-        "Open": o,
-        "High": h,
-        "Low": l,
-        "Close": c,
-        "Volume": v or 0.0,
-    }
-
-
-# ============================================================
-# KLINE VALIDATION
-# ============================================================
-
-def validate_kline_data(
-    rows: list,
-) -> list:
-
-    parsed = []
-
-    for item in rows:
-
-        candle = parse_kline_item(
-            item
-        )
-
-        if candle:
-
-            parsed.append(candle)
-
-    if not parsed:
-        return []
-
-    df = pd.DataFrame(parsed)
-
-    # Remove invalid rows
-    df = df.dropna(
-        subset=[
-            "Date",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-        ]
-    )
-
-    # Remove duplicates
-    df = df.drop_duplicates(
-        subset=["Date"],
-        keep="last",
-    )
-
-    # Validate OHLC
-    df = df[
-        (df["High"] >= df["Low"])
-        & (df["High"] >= df["Open"])
-        & (df["High"] >= df["Close"])
-        & (df["Low"] <= df["Open"])
-        & (df["Low"] <= df["Close"])
-    ]
-
-    df = df.sort_values(
-        "Date"
-    )
-
-    if df.empty:
-        return []
-
-    return df.to_dict(
-        orient="records"
-    )
-
-
-# ============================================================
-# FETCH JSON FROM SUPEREX
+# SUPEREX GET
 # ============================================================
 
 async def superex_get(
@@ -738,9 +446,12 @@ async def superex_get(
     params: dict,
 ):
 
-    global HTTP_SESSION
+    global http_session
 
-    if HTTP_SESSION is None:
+    if (
+        http_session is None
+        or http_session.closed
+    ):
 
         await create_http_session()
 
@@ -758,37 +469,42 @@ async def superex_get(
         try:
 
             logger.info(
-                "SuperEx GET attempt=%s url=%s params=%s",
+                "SUPEREX GET | "
+                "attempt=%s | "
+                "url=%s | "
+                "params=%s",
                 attempt + 1,
                 url,
                 params,
             )
 
-            async with HTTP_SESSION.get(
-                url,
-                params=params,
-                headers=get_superex_headers(),
+            async with (
+                http_session.get(
+                    url,
+                    params=params,
+                    headers=superex_headers(),
+                )
             ) as response:
 
-                text = await response.text()
+                body = (
+                    await response.text()
+                )
 
                 logger.info(
-                    "SuperEx response status=%s "
-                    "content_type=%s "
+                    "SUPEREX RESPONSE | "
+                    "status=%s | "
+                    "url=%s | "
                     "body=%s",
                     response.status,
-                    response.headers.get(
-                        "Content-Type",
-                        ""
-                    ),
-                    text[:2000],
+                    url,
+                    body[:4000],
                 )
 
                 if response.status != 200:
 
                     last_error = (
                         f"HTTP {response.status}: "
-                        f"{text[:500]}"
+                        f"{body[:1000]}"
                     )
 
                     if response.status in (
@@ -797,93 +513,140 @@ async def superex_get(
                         403,
                         404,
                     ):
+
                         break
 
-                    await asyncio.sleep(
-                        0.6 * (attempt + 1)
-                    )
+                    if attempt < HTTP_RETRIES:
+
+                        await asyncio.sleep(
+                            0.7
+                            * (attempt + 1)
+                        )
 
                     continue
 
                 try:
 
                     return json.loads(
-                        text
+                        body
                     )
 
-                except json.JSONDecodeError as exc:
+                except json.JSONDecodeError:
 
-                    last_error = (
-                        f"Invalid JSON: {exc}; "
-                        f"body={text[:500]}"
+                    raise RuntimeError(
+                        "SuperEx returned "
+                        "invalid JSON: "
+                        f"{body[:1000]}"
                     )
 
-                    break
+        except asyncio.TimeoutError as exc:
 
-        except (
-            asyncio.TimeoutError,
-            aiohttp.ClientError,
-        ) as exc:
+            last_error = (
+                "SuperEx timeout"
+            )
+
+            logger.warning(
+                "SuperEx timeout: %r",
+                exc,
+            )
+
+        except aiohttp.ClientError as exc:
 
             last_error = repr(exc)
 
             logger.warning(
-                "SuperEx network error attempt=%s: %r",
-                attempt + 1,
+                "SuperEx network error: %r",
                 exc,
             )
 
-            if attempt < HTTP_RETRIES:
+        except Exception as exc:
 
-                await asyncio.sleep(
-                    0.6 * (attempt + 1)
-                )
+            last_error = repr(exc)
+
+            logger.exception(
+                "SuperEx GET unexpected error"
+            )
+
+            break
+
+        if attempt < HTTP_RETRIES:
+
+            await asyncio.sleep(
+                0.7
+                * (attempt + 1)
+            )
 
     raise RuntimeError(
         last_error
-        or "Unknown SuperEx HTTP error"
+        or "Unknown SuperEx API error"
     )
 
 
 # ============================================================
-# PRICE API
+# PRICE
 # ============================================================
 
-async def fetch_price_data(
+async def fetch_price(
     symbol: str,
-) -> dict:
+):
 
-    base_symbol = normalize_symbol(
+    symbol = normalize_symbol(
         symbol
     )
 
+    cache_key = symbol
+
+    async with CACHE_LOCK:
+
+        cached = cache_get(
+            PRICE_CACHE,
+            cache_key,
+            PRICE_CACHE_TTL,
+        )
+
+    if cached is not None:
+
+        return cached
+
     path = (
-        "/resource/v3/public/currency/new"
+        "/resource/v3/public/"
+        "currency/new"
     )
+
+    params = {
+        "currency":
+            symbol.lower(),
+    }
 
     try:
 
-        payload = await superex_get(
+        response = await superex_get(
             path,
-            {
-                "currency":
-                    base_symbol.lower()
-            },
+            params,
         )
 
-        data = payload.get(
+        if not isinstance(
+            response,
+            dict,
+        ):
+
+            raise RuntimeError(
+                "Invalid ticker response."
+            )
+
+        data = response.get(
             "data",
-            {}
-        ) if isinstance(
-            payload,
-            dict
-        ) else {}
+            {},
+        )
 
         if not isinstance(
             data,
-            dict
+            dict,
         ):
-            data = {}
+
+            raise RuntimeError(
+                "Invalid ticker data."
+            )
 
         price = (
             data.get("newPrice")
@@ -893,296 +656,810 @@ async def fetch_price_data(
         if price is None:
 
             raise RuntimeError(
-                "SuperEx ticker returned "
-                "no newPrice/price"
+                "Price not found in "
+                "SuperEx response."
             )
 
-        return {
-            "symbol": base_symbol,
-            "price": str(price),
-            "change_24h": str(
-                data.get(
-                    "change",
-                    "0"
-                )
-            ),
-            "high": str(
-                data.get(
-                    "maxPrice",
+        result = {
+
+            "symbol":
+                symbol,
+
+            "price":
+                str(price),
+
+            "change_24h":
+                str(
                     data.get(
-                        "high",
-                        "0"
+                        "change",
+                        "0",
                     )
-                )
-            ),
-            "low": str(
-                data.get(
-                    "minPrice",
+                ),
+
+            "high":
+                str(
                     data.get(
-                        "low",
-                        "0"
+                        "maxPrice",
+                        data.get(
+                            "high",
+                            "0",
+                        ),
                     )
-                )
-            ),
-            "volume": str(
-                data.get(
-                    "sumNumber",
+                ),
+
+            "low":
+                str(
                     data.get(
-                        "volume",
-                        "0"
+                        "minPrice",
+                        data.get(
+                            "low",
+                            "0",
+                        ),
                     )
-                )
-            ),
-            "source": "SuperEx",
+                ),
+
+            "volume":
+                str(
+                    data.get(
+                        "sumNumber",
+                        data.get(
+                            "volume",
+                            "0",
+                        ),
+                    )
+                ),
         }
-
-    except Exception as exc:
-
-        logger.exception(
-            "SuperEx price error for %s",
-            symbol,
-        )
-
-        await notify_admin_error(
-            "superex_price",
-            (
-                f"Symbol: {base_symbol}\n"
-                f"Error: {exc}"
-            ),
-        )
-
-        return {
-            "error":
-                "دریافت قیمت از SuperEx "
-                "با خطا مواجه شد."
-        }
-
-
-# ============================================================
-# CACHED PRICE
-# ============================================================
-
-async def get_price_data_cached(
-    symbol: str,
-) -> dict:
-
-    key = normalize_symbol(
-        symbol
-    )
-
-    async with CACHE_LOCK:
-
-        cached = cache_get(
-            PRICE_CACHE,
-            key,
-            PRICE_CACHE_TTL,
-        )
-
-    if cached is not None:
-
-        return cached
-
-    data = await fetch_price_data(
-        key
-    )
-
-    if "error" not in data:
 
         async with CACHE_LOCK:
 
             cache_set(
                 PRICE_CACHE,
-                key,
-                data,
+                cache_key,
+                result,
             )
 
-    return data
+        return result
+
+    except Exception as exc:
+
+        logger.exception(
+            "Price fetch failed for %s",
+            symbol,
+        )
+
+        await notify_admin(
+            "PRICE",
+            (
+                f"Symbol: {symbol}\n"
+                f"Error: {exc}"
+            ),
+        )
+
+        raise
 
 
 # ============================================================
-# KLINE API
+# CURRENCY ID
 # ============================================================
 
-async def fetch_superex_kline(
+async def get_currency_id(
     symbol: str,
-    timeframe: str,
-) -> list:
+) -> int:
 
-    symbol_clean = normalize_symbol(
+    symbol = normalize_symbol(
         symbol
     )
 
-    if timeframe not in TIMEFRAME_MAP:
-
-        raise ValueError(
-            f"Unsupported timeframe: {timeframe}"
+    cached = (
+        CURRENCY_ID_CACHE.get(
+            symbol
         )
-
-    resolution = TIMEFRAME_MAP[
-        timeframe
-    ]
-
-    market_symbol = (
-        symbol_clean.lower()
-        + "_usdt"
     )
 
+    if cached is not None:
+
+        return cached
+
     path = (
-        "/resource/v3/public/kline"
+        "/api/free-spot/v3/symbols"
     )
 
     params = {
-        "symbol": market_symbol,
-        "resolution": resolution,
-        "limit": KLINE_LIMIT,
+        "currency":
+            symbol,
     }
 
-    # --------------------------------------------------------
-    # Prevent multiple identical Kline requests
-    # --------------------------------------------------------
+    response = await superex_get(
+        path,
+        params,
+    )
 
-    lock_key = (
-        symbol_clean,
+    logger.info(
+        "SUPEREX SYMBOLS DATA | %s",
+        str(response)[:5000],
+    )
+
+    if not isinstance(
+        response,
+        dict,
+    ):
+
+        raise RuntimeError(
+            "Invalid symbols response."
+        )
+
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(
+        data,
+        dict,
+    ):
+
+        possible_lists = [
+            data.get("list"),
+            data.get("items"),
+            data.get("rows"),
+            data.get("data"),
+        ]
+
+        data = next(
+            (
+                x
+                for x in possible_lists
+                if isinstance(x, list)
+            ),
+            None,
+        )
+
+    if not isinstance(
+        data,
+        list,
+    ):
+
+        raise RuntimeError(
+            "SuperEx symbols data "
+            "is not a list."
+        )
+
+    for item in data:
+
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        currency = str(
+            item.get(
+                "currency",
+                "",
+            )
+        ).upper()
+
+        if (
+            currency
+            == symbol
+        ):
+
+            currency_id = (
+                item.get(
+                    "currencyId"
+                )
+            )
+
+            if (
+                currency_id
+                is None
+            ):
+                continue
+
+            currency_id = int(
+                currency_id
+            )
+
+            CURRENCY_ID_CACHE[
+                symbol
+            ] = currency_id
+
+            logger.info(
+                "Currency ID resolved | "
+                "%s -> %s",
+                symbol,
+                currency_id,
+            )
+
+            return currency_id
+
+    # Some SuperEx responses may use
+    # currencyName instead of currency.
+    for item in data:
+
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        candidates = [
+            item.get("currencyName"),
+            item.get("name"),
+            item.get("symbol"),
+        ]
+
+        for candidate in candidates:
+
+            if (
+                str(candidate)
+                .upper()
+                == symbol
+            ):
+
+                currency_id = (
+                    item.get(
+                        "currencyId"
+                    )
+                )
+
+                if (
+                    currency_id
+                    is not None
+                ):
+
+                    currency_id = int(
+                        currency_id
+                    )
+
+                    CURRENCY_ID_CACHE[
+                        symbol
+                    ] = currency_id
+
+                    return currency_id
+
+    raise RuntimeError(
+        f"currencyId not found for "
+        f"{symbol}"
+    )
+
+
+# ============================================================
+# PARSE KLINE ROW
+# ============================================================
+
+def parse_kline_row(
+    row,
+):
+
+    if isinstance(
+        row,
+        str,
+    ):
+
+        parts = row.split(",")
+
+    elif isinstance(
+        row,
+        (list, tuple),
+    ):
+
+        parts = row
+
+    elif isinstance(
+        row,
+        dict,
+    ):
+
+        timestamp = (
+            row.get("timestamp")
+            or row.get("time")
+            or row.get("ts")
+            or row.get("t")
+        )
+
+        high = (
+            row.get("high")
+            or row.get("h")
+        )
+
+        open_price = (
+            row.get("open")
+            or row.get("o")
+        )
+
+        low = (
+            row.get("low")
+            or row.get("l")
+        )
+
+        close = (
+            row.get("close")
+            or row.get("c")
+        )
+
+        volume = (
+            row.get("volume")
+            or row.get("v")
+            or 0
+        )
+
+        parts = [
+            timestamp,
+            high,
+            open_price,
+            low,
+            close,
+            volume,
+        ]
+
+    else:
+
+        return None
+
+    if len(parts) < 6:
+
+        return None
+
+    try:
+
+        timestamp = int(
+            float(parts[0])
+        )
+
+        # SuperEx format:
+        #
+        # timestamp,
+        # high,
+        # open,
+        # low,
+        # close,
+        # volume
+
+        high = float(parts[1])
+
+        open_price = float(
+            parts[2]
+        )
+
+        low = float(parts[3])
+
+        close = float(
+            parts[4]
+        )
+
+        volume = float(
+            parts[5]
+        )
+
+        # Automatically support
+        # seconds / milliseconds.
+
+        if timestamp < 10_000_000_000:
+
+            date = pd.to_datetime(
+                timestamp,
+                unit="s",
+                utc=True,
+            )
+
+        else:
+
+            date = pd.to_datetime(
+                timestamp,
+                unit="ms",
+                utc=True,
+            )
+
+        if (
+            open_price <= 0
+            or high <= 0
+            or low <= 0
+            or close <= 0
+        ):
+
+            return None
+
+        if high < low:
+
+            return None
+
+        if high < open_price:
+
+            return None
+
+        if high < close:
+
+            return None
+
+        if low > open_price:
+
+            return None
+
+        if low > close:
+
+            return None
+
+        return {
+
+            "Date":
+                date,
+
+            "Open":
+                open_price,
+
+            "High":
+                high,
+
+            "Low":
+                low,
+
+            "Close":
+                close,
+
+            "Volume":
+                volume,
+        }
+
+    except (
+        ValueError,
+        TypeError,
+        OverflowError,
+    ) as exc:
+
+        logger.warning(
+            "Invalid Kline row: %r | %r",
+            row,
+            exc,
+        )
+
+        return None
+
+
+# ============================================================
+# KLINE
+# ============================================================
+
+async def fetch_kline(
+    symbol: str,
+    timeframe: str,
+):
+
+    symbol = normalize_symbol(
+        symbol
+    )
+
+    if (
+        timeframe
+        not in TIMEFRAME_SECONDS
+    ):
+
+        raise ValueError(
+            f"Unsupported timeframe: "
+            f"{timeframe}"
+        )
+
+    cache_key = (
+        symbol,
         timeframe,
     )
 
-    async with KLINE_LOCKS[
-        lock_key
-    ]:
+    async with CACHE_LOCK:
 
-        payload = await superex_get(
+        cached = cache_get(
+            CHART_CACHE,
+            cache_key,
+            CHART_CACHE_TTL,
+        )
+
+    # We cache parsed candles here
+    # temporarily only if available.
+
+    if (
+        cached is not None
+        and isinstance(
+            cached,
+            list,
+        )
+        and cached
+        and isinstance(
+            cached[0],
+            dict,
+        )
+        and "Open" in cached[0]
+    ):
+
+        return cached
+
+    lock = get_kline_lock(
+        symbol,
+        timeframe,
+    )
+
+    async with lock:
+
+        # Check cache again after lock
+        async with CACHE_LOCK:
+
+            cached = cache_get(
+                CHART_CACHE,
+                cache_key,
+                CHART_CACHE_TTL,
+            )
+
+        if (
+            cached is not None
+            and isinstance(
+                cached,
+                list,
+            )
+            and cached
+            and "Open" in cached[0]
+        ):
+
+            return cached
+
+        currency_id = (
+            await get_currency_id(
+                symbol
+            )
+        )
+
+        time_type = (
+            TIMEFRAME_SECONDS[
+                timeframe
+            ]
+        )
+
+        path = (
+            "/api/free-spot/v3/klines"
+        )
+
+        params = {
+
+            "currencyId":
+                currency_id,
+
+            "timeType":
+                time_type,
+
+            "limit":
+                KLINE_LIMIT,
+        }
+
+        logger.info(
+            "KLINE REQUEST | "
+            "symbol=%s | "
+            "currencyId=%s | "
+            "timeframe=%s | "
+            "timeType=%s",
+            symbol,
+            currency_id,
+            timeframe,
+            time_type,
+        )
+
+        response = await superex_get(
             path,
             params,
         )
 
-    rows = extract_kline_container(
-        payload
-    )
-
-    logger.info(
-        "SuperEx Kline raw rows: %s",
-        len(rows),
-    )
-
-    if not rows:
-
-        logger.error(
-            "SuperEx Kline returned no rows. "
-            "payload=%s",
-            str(payload)[:4000],
+        logger.info(
+            "KLINE RAW RESPONSE | %s",
+            str(response)[:6000],
         )
 
-        raise RuntimeError(
-            "SuperEx Kline response "
-            "contains no candle rows."
+        if not isinstance(
+            response,
+            dict,
+        ):
+
+            raise RuntimeError(
+                "Kline response is not "
+                "a JSON object."
+            )
+
+        code = response.get(
+            "code"
         )
 
-    parsed = validate_kline_data(
-        rows
-    )
+        if (
+            code is not None
+            and str(code)
+            not in (
+                "0",
+                "200",
+            )
+        ):
 
-    logger.info(
-        "SuperEx Kline parsed candles: %s",
-        len(parsed),
-    )
+            raise RuntimeError(
+                "SuperEx Kline error: "
+                f"code={code}, "
+                f"msg={response.get('msg')}"
+            )
 
-    if not parsed:
-
-        raise RuntimeError(
-            "SuperEx Kline rows were "
-            "received but could not be parsed."
+        data = response.get(
+            "data"
         )
 
-    return parsed
+        if isinstance(
+            data,
+            dict,
+        ):
+
+            for key in (
+                "data",
+                "list",
+                "rows",
+                "items",
+                "klines",
+            ):
+
+                if isinstance(
+                    data.get(key),
+                    list,
+                ):
+
+                    data = data[key]
+
+                    break
+
+        if not isinstance(
+            data,
+            list,
+        ):
+
+            raise RuntimeError(
+                "SuperEx Kline data "
+                "is not a list."
+            )
+
+        if not data:
+
+            raise RuntimeError(
+                "SuperEx returned "
+                "empty Kline data."
+            )
+
+        records = []
+
+        for row in data:
+
+            parsed = (
+                parse_kline_row(row)
+            )
+
+            if parsed:
+
+                records.append(
+                    parsed
+                )
+
+        if not records:
+
+            raise RuntimeError(
+                "Kline rows were received "
+                "but none could be parsed."
+            )
+
+        df = pd.DataFrame(
+            records
+        )
+
+        df = (
+            df.drop_duplicates(
+                subset=["Date"],
+                keep="last",
+            )
+            .sort_values(
+                "Date"
+            )
+        )
+
+        df = df[
+            [
+                "Date",
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume",
+            ]
+        ]
+
+        if df.empty:
+
+            raise RuntimeError(
+                "Kline DataFrame is empty."
+            )
+
+        logger.info(
+            "KLINE SUCCESS | "
+            "symbol=%s | "
+            "timeframe=%s | "
+            "candles=%s | "
+            "first=%s | "
+            "last=%s",
+            symbol,
+            timeframe,
+            len(df),
+            df.iloc[0]["Date"],
+            df.iloc[-1]["Date"],
+        )
+
+        records = df.to_dict(
+            orient="records"
+        )
+
+        async with CACHE_LOCK:
+
+            cache_set(
+                CHART_CACHE,
+                cache_key,
+                records,
+                max_entries=300,
+            )
+
+        return records
 
 
 # ============================================================
 # CHART STYLE
 # ============================================================
 
-MARKET_COLORS = mpf.make_marketcolors(
-    up="#00d964",
-    down="#ff3b3b",
-    edge="inherit",
-    wick="inherit",
-    volume="in",
-    ohlc="i",
-)
-
-
-CHART_STYLE = mpf.make_mpf_style(
-    marketcolors=MARKET_COLORS,
-    base_mpf_style="binance",
-    facecolor="#000000",
-    edgecolor="#555555",
-    figcolor="#000000",
-    gridcolor="#222222",
-    gridstyle="--",
-    y_on_right=False,
-    rc={
-        "font.family":
-            "DejaVu Sans",
-        "axes.titleweight":
-            "normal",
-        "axes.titlesize":
-            13,
-        "axes.titlecolor":
-            "#e6e6e6",
-        "axes.labelcolor":
-            "#cfcfcf",
-        "xtick.color":
-            "#9a9a9a",
-        "ytick.color":
-            "#9a9a9a",
-        "text.color":
-            "#9a9a9a",
-    },
-)
-
-
-# ============================================================
-# CHART EXECUTOR
-# ============================================================
-
-CHART_RENDER_EXECUTOR = (
-    ThreadPoolExecutor(
-        max_workers=CHART_RENDER_WORKERS,
-        thread_name_prefix="chart-render",
+MARKET_COLORS = (
+    mpf.make_marketcolors(
+        up="#00d964",
+        down="#ff3b30",
+        edge="inherit",
+        wick="inherit",
+        volume="inherit",
     )
 )
 
-
-CHART_RENDER_SEMAPHORE = (
-    asyncio.Semaphore(
-        MAX_CONCURRENT_CHARTS
+CHART_STYLE = (
+    mpf.make_mpf_style(
+        base_mpf_style="nightclouds",
+        marketcolors=MARKET_COLORS,
+        facecolor="#0b0b0b",
+        figcolor="#0b0b0b",
+        gridcolor="#242424",
+        gridstyle="--",
+        rc={
+            "font.family":
+                "DejaVu Sans",
+            "axes.titlecolor":
+                "#ffffff",
+            "axes.labelcolor":
+                "#cccccc",
+            "xtick.color":
+                "#999999",
+            "ytick.color":
+                "#999999",
+        },
     )
 )
 
 
 # ============================================================
-# IMAGE CROP
+# CROP
 # ============================================================
 
-def autocrop_black_margins(
-    png_bytes: bytes,
-    padding: int = 14,
-    min_width: int = 1100,
+def crop_image(
+    data: bytes,
 ) -> bytes:
 
-    img = Image.open(
-        io.BytesIO(
-            png_bytes
-        )
+    image = Image.open(
+        io.BytesIO(data)
     ).convert("RGB")
 
     background = Image.new(
         "RGB",
-        img.size,
-        (0, 0, 0),
+        image.size,
+        (11, 11, 11),
     )
 
     diff = ImageChops.difference(
-        img,
+        image,
         background,
     )
 
@@ -1190,7 +1467,11 @@ def autocrop_black_margins(
 
     if bbox:
 
-        left, top, right, bottom = bbox
+        left, top, right, bottom = (
+            bbox
+        )
+
+        padding = 12
 
         left = max(
             0,
@@ -1203,16 +1484,16 @@ def autocrop_black_margins(
         )
 
         right = min(
-            img.width,
+            image.width,
             right + padding,
         )
 
         bottom = min(
-            img.height,
+            image.height,
             bottom + padding,
         )
 
-        img = img.crop(
+        image = image.crop(
             (
                 left,
                 top,
@@ -1221,27 +1502,9 @@ def autocrop_black_margins(
             )
         )
 
-    if img.width < min_width:
-
-        scale = (
-            min_width
-            / img.width
-        )
-
-        img = img.resize(
-            (
-                min_width,
-                round(
-                    img.height
-                    * scale
-                ),
-            ),
-            Image.Resampling.LANCZOS,
-        )
-
     output = io.BytesIO()
 
-    img.save(
+    image.save(
         output,
         format="PNG",
         optimize=True,
@@ -1251,14 +1514,14 @@ def autocrop_black_margins(
 
 
 # ============================================================
-# SYNC CHART RENDERER
+# RENDER CHART SYNC
 # ============================================================
 
 def render_chart_sync(
-    records: list,
-    symbol: str,
-    timeframe: str,
-) -> bytes:
+    records,
+    symbol,
+    timeframe,
+):
 
     df = pd.DataFrame(
         records
@@ -1267,12 +1530,16 @@ def render_chart_sync(
     if df.empty:
 
         raise ValueError(
-            "Empty DataFrame"
+            "No candles to render."
         )
 
     df["Date"] = pd.to_datetime(
         df["Date"],
         utc=True,
+    )
+
+    df = df.sort_values(
+        "Date"
     )
 
     df.set_index(
@@ -1290,98 +1557,73 @@ def render_chart_sync(
         ]
     ]
 
-    df = df.sort_index()
-
-    # mplfinance prefers timezone-naive indexes
     df.index = (
         df.index
         .tz_convert(None)
     )
 
-    if timeframe == "1d":
+    if len(df) > KLINE_LIMIT:
 
-        date_format = "%b"
-        x_rotation = 0
-
-    else:
-
-        date_format = "%H:%M"
-        x_rotation = 0
+        df = df.iloc[
+            -KLINE_LIMIT:
+        ]
 
     fig, axes = mpf.plot(
         df,
         type="candle",
         style=CHART_STYLE,
         volume=False,
-        title=(
-            f"{symbol.upper()}/USDT"
-            f" | {timeframe}"
-        ),
-        ylabel="Price (USDT)",
-        datetime_format=date_format,
-        xrotation=x_rotation,
-        tight_layout=False,
         returnfig=True,
-        figsize=(13, 7.8),
-        show_nontrading=False,
+        figsize=(13, 7.5),
+        title=(
+            f"{symbol}/USDT   •   "
+            f"{timeframe}"
+        ),
+        ylabel="USDT",
+        datetime_format=(
+            "%H:%M"
+            if timeframe != "1d"
+            else "%Y-%m-%d"
+        ),
+        xrotation=0,
+        tight_layout=False,
     )
 
     try:
 
         fig.subplots_adjust(
-            top=0.94,
+            top=0.93,
             bottom=0.11,
             left=0.065,
             right=0.985,
         )
 
-        for ax in axes:
-
-            for spine in (
-                ax.spines.values()
-            ):
-
-                spine.set_visible(
-                    True
-                )
-
-                spine.set_color(
-                    "#555555"
-                )
-
-                spine.set_linewidth(
-                    0.8
-                )
-
         fig.text(
             0.5,
-            0.02,
-            "Created by @SuperExFa_bot | @SuperexIR",
+            0.025,
+            "@SuperExPrice_bot",
             ha="center",
             va="center",
-            fontsize=10.5,
-            color="#9a9a9a",
+            fontsize=10,
+            color="#888888",
         )
 
         output = io.BytesIO()
 
         fig.savefig(
             output,
+            format="png",
             dpi=140,
-            bbox_inches=None,
-            pad_inches=0,
             facecolor=fig.get_facecolor(),
             edgecolor="none",
-            format="png",
+            bbox_inches=None,
         )
 
-        return autocrop_black_margins(
+        return crop_image(
             output.getvalue()
         )
 
     finally:
-
-        output.close()
 
         plt.close(fig)
 
@@ -1390,249 +1632,254 @@ def render_chart_sync(
 # GENERATE CHART
 # ============================================================
 
-async def generate_chart_image(
-    symbol: str,
-    timeframe: str,
-) -> bytes:
+async def generate_chart(
+    symbol,
+    timeframe,
+):
 
-    symbol_clean = normalize_symbol(
+    symbol = normalize_symbol(
         symbol
     )
 
-    cache_key = (
-        symbol_clean,
-        timeframe,
-    )
+    async with CHART_SEMAPHORE:
 
-    async with CACHE_LOCK:
+        try:
 
-        cached = cache_get(
-            CHART_CACHE,
-            cache_key,
-            CHART_CACHE_TTL,
-        )
+            records = (
+                await fetch_kline(
+                    symbol,
+                    timeframe,
+                )
+            )
 
-    if cached is not None:
+            loop = (
+                asyncio.get_running_loop()
+            )
 
-        logger.info(
-            "Chart cache HIT %s %s",
-            symbol_clean,
-            timeframe,
-        )
+            image = (
+                await loop.run_in_executor(
+                    CHART_EXECUTOR,
+                    render_chart_sync,
+                    records,
+                    symbol,
+                    timeframe,
+                )
+            )
 
-        return cached
+            return image
 
-    logger.info(
-        "Generating chart %s %s",
-        symbol_clean,
-        timeframe,
-    )
+        except Exception as exc:
 
-    try:
-
-        records = (
-            await fetch_superex_kline(
-                symbol_clean,
+            logger.exception(
+                "Chart generation failed | "
+                "%s | %s",
+                symbol,
                 timeframe,
             )
-        )
 
-    except Exception as exc:
-
-        logger.exception(
-            "SuperEx Kline failed "
-            "symbol=%s timeframe=%s",
-            symbol_clean,
-            timeframe,
-        )
-
-        await notify_admin_error(
-            "superex_chart",
-            (
-                f"Symbol: {symbol_clean}\n"
-                f"Timeframe: {timeframe}\n"
-                f"Error: {exc}"
-            ),
-        )
-
-        raise ValueError(
-            "چارت SuperEx در دسترس نیست."
-        )
-
-    async with CHART_RENDER_SEMAPHORE:
-
-        loop = asyncio.get_running_loop()
-
-        image_bytes = (
-            await loop.run_in_executor(
-                CHART_RENDER_EXECUTOR,
-                render_chart_sync,
-                records,
-                symbol_clean,
-                timeframe,
+            await notify_admin(
+                "CHART",
+                (
+                    f"Symbol: {symbol}\n"
+                    f"Timeframe: {timeframe}\n"
+                    f"Error: {exc}"
+                ),
             )
-        )
 
-    async with CACHE_LOCK:
+            raise
 
-        cache_set(
-            CHART_CACHE,
-            cache_key,
-            image_bytes,
-        )
 
-    return image_bytes
+# ============================================================
+# CALLBACK DATA
+# ============================================================
+
+def chart_callback(
+    symbol,
+    timeframe,
+):
+
+    return (
+        f"chart:"
+        f"{normalize_symbol(symbol)}:"
+        f"{timeframe}"
+    )
 
 
 # ============================================================
 # KEYBOARD
 # ============================================================
 
-def get_price_keyboard(
-    symbol: str,
-) -> InlineKeyboardMarkup:
+def chart_keyboard(
+    symbol,
+):
 
-    symbol_clean = normalize_symbol(
+    symbol = normalize_symbol(
         symbol
     )
 
-    register_url = (
-        "https://app.superex.live/"
-        "register?"
-        "invitationCode=VQK2N6DDS"
-    )
-
-    group_url = (
-        "https://t.me/SuperexIR"
-    )
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                text="1m",
-                callback_data=ChartCallback(
-                    symbol=symbol_clean,
-                    timeframe="1m",
-                ).pack(),
-            ),
-            InlineKeyboardButton(
-                text="15m",
-                callback_data=ChartCallback(
-                    symbol=symbol_clean,
-                    timeframe="15m",
-                ).pack(),
-            ),
-            InlineKeyboardButton(
-                text="1h",
-                callback_data=ChartCallback(
-                    symbol=symbol_clean,
-                    timeframe="1h",
-                ).pack(),
-            ),
-            InlineKeyboardButton(
-                text="4h",
-                callback_data=ChartCallback(
-                    symbol=symbol_clean,
-                    timeframe="4h",
-                ).pack(),
-            ),
-            InlineKeyboardButton(
-                text="1d",
-                callback_data=ChartCallback(
-                    symbol=symbol_clean,
-                    timeframe="1d",
-                ).pack(),
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="عضویت در گروه 👥",
-                url=group_url,
-            ),
-            InlineKeyboardButton(
-                text="ثبت نام در صرافی 🏦",
-                url=register_url,
-            ),
-        ],
+    timeframes = [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "4h",
+        "12h",
+        "1d",
+        "1w",
     ]
 
+    rows = []
+
+    row = []
+
+    for timeframe in timeframes:
+
+        row.append(
+            InlineKeyboardButton(
+                text=timeframe,
+                callback_data=(
+                    chart_callback(
+                        symbol,
+                        timeframe,
+                    )
+                ),
+            )
+        )
+
+        if len(row) == 5:
+
+            rows.append(row)
+
+            row = []
+
+    if row:
+
+        rows.append(row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="👥 گروه SuperEx",
+                url=(
+                    "https://t.me/SuperexIR"
+                ),
+            ),
+            InlineKeyboardButton(
+                text="🏦 ثبت‌نام SuperEx",
+                url=(
+                    "https://app.superex.live/"
+                    "register?"
+                    "invitationCode="
+                    "VQK2N6DDS"
+                ),
+            ),
+        ]
+    )
+
     return InlineKeyboardMarkup(
-        inline_keyboard=keyboard
+        inline_keyboard=rows
     )
 
 
 # ============================================================
-# CAPTION
+# PRICE CAPTION
 # ============================================================
 
-def build_price_caption(
-    data: dict,
-) -> str:
+def price_caption(
+    data,
+):
 
     return (
-        f"🪙 **{data['symbol']}**\n"
-        f"💰 **P:** ${data['price']}\n"
-        f"📉 **24h:** {data['change_24h']}%\n\n"
-        f"📈 **H:** ${data['high']}\n"
-        f"📉 **L:** ${data['low']}\n"
-        f"📊 **Vol:** "
-        f"{data['volume']} USDT\n"
+        f"🪙 <b>{data['symbol']}/USDT</b>\n\n"
+        f"💰 <b>Price:</b> "
+        f"${data['price']}\n"
+        f"📊 <b>24h:</b> "
+        f"{data['change_24h']}%\n\n"
+        f"📈 <b>High:</b> "
+        f"${data['high']}\n"
+        f"📉 <b>Low:</b> "
+        f"${data['low']}\n"
+        f"📊 <b>Volume:</b> "
+        f"{data['volume']} USDT\n\n"
+        f"🏦 <b>Source:</b> SuperEx"
     )
 
 
 # ============================================================
-# START COMMAND
+# START
 # ============================================================
 
-@dp.message(F.text == "/start")
+@dp.message(
+    F.text == "/start"
+)
 async def start_handler(
     message: types.Message,
 ):
 
     await message.answer(
-        "👋 به ربات SuperEx خوش آمدید.\n\n"
-        "نماد ارز را ارسال کنید.\n\n"
+        "👋 <b>SuperEx Market Bot</b>\n\n"
+        "نام ارز را ارسال کن تا قیمت "
+        "و چارت مستقیم SuperEx نمایش "
+        "داده شود.\n\n"
         "مثال:\n"
-        "`BTC`\n"
-        "`ETH`\n"
-        "`SOL`",
-        parse_mode="Markdown",
+        "<code>BTC</code>\n"
+        "<code>ETH</code>\n"
+        "<code>SOL</code>\n\n"
+        "تایم‌فریم‌های چارت:\n"
+        "1m • 5m • 15m • 30m • 1h • "
+        "4h • 12h • 1d • 1w",
+        parse_mode="HTML",
     )
 
 
 # ============================================================
-# HEALTH / DEBUG COMMANDS
+# HEALTH
 # ============================================================
 
-@dp.message(F.text == "/health")
-async def health_command(
+@dp.message(
+    F.text == "/health"
+)
+async def health_handler(
     message: types.Message,
 ):
 
-    session_status = (
-        "OK"
-        if HTTP_SESSION
-        and not HTTP_SESSION.closed
-        else "CLOSED"
+    session_ok = (
+        http_session is not None
+        and not http_session.closed
     )
 
     await message.answer(
-        "🟢 Bot status\n\n"
-        f"HTTP Session: {session_status}\n"
-        f"SuperEx API: {SUPEREX_API_BASE}\n"
-        f"Cache prices: {len(PRICE_CACHE)}\n"
-        f"Cache charts: {len(CHART_CACHE)}"
+        "🟢 <b>Bot Health</b>\n\n"
+        f"HTTP Session: "
+        f"{'OK' if session_ok else 'DOWN'}\n"
+        f"SuperEx: OK\n"
+        f"Price Cache: "
+        f"{len(PRICE_CACHE)}\n"
+        f"Chart Cache: "
+        f"{len(CHART_CACHE)}\n"
+        f"Currency Cache: "
+        f"{len(CURRENCY_ID_CACHE)}",
+        parse_mode="HTML",
     )
 
+
+# ============================================================
+# DEBUG KLINE
+# ============================================================
 
 @dp.message(
     F.text.startswith("/debug_kline")
 )
-async def debug_kline_command(
+async def debug_kline_handler(
     message: types.Message,
 ):
 
-    parts = message.text.split()
+    parts = (
+        message.text
+        .strip()
+        .split()
+    )
 
     symbol = (
         parts[1]
@@ -1646,62 +1893,83 @@ async def debug_kline_command(
         else "1h"
     )
 
-    if timeframe not in TIMEFRAME_MAP:
+    symbol = normalize_symbol(
+        symbol
+    )
+
+    if (
+        timeframe
+        not in TIMEFRAME_SECONDS
+    ):
 
         await message.answer(
-            "Timeframe معتبر نیست.\n"
-            "1m / 15m / 1h / 4h / 1d"
+            "❌ Timeframe نامعتبر است.\n\n"
+            "معتبر:\n"
+            "1m 5m 15m 30m 1h "
+            "4h 12h 1d 1w"
         )
 
         return
 
-    processing = await message.answer(
-        "🔎 در حال تست مستقیم Kline SuperEx..."
+    status = await message.answer(
+        "🔎 در حال تست مستقیم "
+        "Kline SuperEx..."
     )
 
     try:
 
         records = (
-            await fetch_superex_kline(
+            await fetch_kline(
                 symbol,
                 timeframe,
             )
         )
 
         first = records[0]
+
         last = records[-1]
 
-        await processing.edit_text(
-            "✅ Kline OK\n\n"
-            f"Symbol: {normalize_symbol(symbol)}\n"
-            f"Timeframe: {timeframe}\n"
-            f"Candles: {len(records)}\n\n"
-            f"First close: {first['Close']}\n"
-            f"Last close: {last['Close']}"
+        await status.edit_text(
+            "✅ <b>Kline OK</b>\n\n"
+            f"Symbol: <b>{symbol}</b>\n"
+            f"Timeframe: <b>{timeframe}</b>\n"
+            f"Candles: "
+            f"<b>{len(records)}</b>\n\n"
+            f"First:\n"
+            f"{first['Date']} | "
+            f"Close={first['Close']}\n\n"
+            f"Last:\n"
+            f"{last['Date']} | "
+            f"Close={last['Close']}",
+            parse_mode="HTML",
         )
 
     except Exception as exc:
 
         logger.exception(
-            "Debug Kline failed"
+            "DEBUG KLINE FAILED"
         )
 
-        await processing.edit_text(
-            "❌ Kline FAILED\n\n"
-            f"{str(exc)[:3000]}"
+        await status.edit_text(
+            "❌ <b>Kline FAILED</b>\n\n"
+            f"<code>{str(exc)[:3500]}</code>",
+            parse_mode="HTML",
         )
 
 
 # ============================================================
-# TICKER HANDLER
+# USER SYMBOL
 # ============================================================
 
-@dp.message(F.text)
-async def handle_ticker_input(
+@dp.message(
+    F.text
+)
+async def symbol_handler(
     message: types.Message,
 ):
 
     if not message.text:
+
         return
 
     text = (
@@ -1711,69 +1979,68 @@ async def handle_ticker_input(
     )
 
     if text.startswith("/"):
+
         return
 
-    if not text.isalnum():
-        return
-
-    if len(text) > 15:
-        return
+    # Allow:
+    #
+    # BTC
+    # BTCUSDT
+    # BTC/USDT
+    # BTC-USDT
 
     symbol = normalize_symbol(
         text
     )
 
-    processing = await message.answer(
-        "⏳ در حال دریافت اطلاعات SuperEx..."
-    )
+    if not symbol:
 
-    # Start price and chart simultaneously
-    price_task = asyncio.create_task(
-        get_price_data_cached(
-            symbol
-        )
-    )
+        return
 
-    chart_task = asyncio.create_task(
-        generate_chart_image(
-            symbol,
-            "1h",
-        )
+    if not symbol.isalnum():
+
+        return
+
+    if len(symbol) > 15:
+
+        return
+
+    status = await message.answer(
+        "⏳ در حال دریافت اطلاعات "
+        "از SuperEx..."
     )
 
     try:
 
-        price_data = await price_task
-
-        if "error" in price_data:
-
-            chart_task.cancel()
-
-            with suppress(
-                asyncio.CancelledError
-            ):
-                await chart_task
-
-            await processing.edit_text(
-                f"❌ {price_data['error']}"
-            )
-
-            return
-
-        caption = (
-            build_price_caption(
-                price_data
+        price_task = asyncio.create_task(
+            fetch_price(
+                symbol
             )
         )
 
+        chart_task = asyncio.create_task(
+            generate_chart(
+                symbol,
+                "1h",
+            )
+        )
+
+        price = await price_task
+
+        image = None
+
         try:
 
-            chart_bytes = (
-                await chart_task
-            )
+            image = await chart_task
+
+        except Exception:
+
+            image = None
+
+        if image:
 
             photo = BufferedInputFile(
-                chart_bytes,
+                image,
                 filename=(
                     f"{symbol}_1h.png"
                 ),
@@ -1781,80 +2048,95 @@ async def handle_ticker_input(
 
             await message.answer_photo(
                 photo=photo,
-                caption=caption,
-                parse_mode="Markdown",
+                caption=price_caption(
+                    price
+                ),
+                parse_mode="HTML",
                 reply_markup=(
-                    get_price_keyboard(
+                    chart_keyboard(
                         symbol
                     )
                 ),
             )
 
-        except Exception as chart_exc:
-
-            logger.exception(
-                "Chart generation error"
-            )
+        else:
 
             await message.answer(
-                caption
-                + "\n\n"
-                + "⚠️ چارت SuperEx "
-                  "در حال حاضر در دسترس نیست.",
-                parse_mode="Markdown",
+                price_caption(
+                    price
+                )
+                + (
+                    "\n\n"
+                    "⚠️ چارت SuperEx "
+                    "فعلاً در دسترس نیست."
+                ),
+                parse_mode="HTML",
                 reply_markup=(
-                    get_price_keyboard(
+                    chart_keyboard(
                         symbol
                     )
                 ),
             )
-
-        finally:
-
-            with suppress(
-                Exception
-            ):
-                await processing.delete()
 
     except Exception as exc:
 
         logger.exception(
-            "Ticker handler failed"
+            "Symbol handler failed"
         )
 
-        with suppress(
-            Exception
-        ):
-            chart_task.cancel()
+        await message.answer(
+            "❌ دریافت اطلاعات SuperEx "
+            "با خطا مواجه شد.\n\n"
+            "لطفاً نماد را بررسی کن.",
+        )
+
+    finally:
 
         with suppress(
             Exception
         ):
-            await processing.edit_text(
-                "❌ خطایی هنگام دریافت "
-                "اطلاعات رخ داد."
-            )
+
+            await status.delete()
 
 
 # ============================================================
-# TIMEFRAME CALLBACK
+# CHART CALLBACK
 # ============================================================
 
 @dp.callback_query(
-    ChartCallback.filter()
+    F.data.startswith("chart:")
 )
-async def process_chart_timeframe(
-    query: types.CallbackQuery,
-    callback_data: ChartCallback,
+async def chart_callback_handler(
+    query: CallbackQuery,
 ):
 
-    symbol = normalize_symbol(
-        callback_data.symbol
+    if not query.data:
+
+        return
+
+    parts = (
+        query.data.split(":")
     )
 
-    timeframe = callback_data.timeframe
+    if len(parts) != 3:
 
-    if timeframe not in TIMEFRAME_MAP:
+        await query.answer(
+            "دکمه نامعتبر است.",
+            show_alert=True,
+        )
+
+        return
+
+    symbol = normalize_symbol(
+        parts[1]
+    )
+
+    timeframe = parts[2]
+
+    if (
+        timeframe
+        not in TIMEFRAME_SECONDS
+    ):
 
         await query.answer(
             "تایم‌فریم نامعتبر است.",
@@ -1869,31 +2151,34 @@ async def process_chart_timeframe(
 
     try:
 
-        chart_bytes = (
-            await generate_chart_image(
-                symbol,
-                timeframe,
+        image = await generate_chart(
+            symbol,
+            timeframe,
+        )
+
+        media = (
+            types.InputMediaPhoto(
+                media=BufferedInputFile(
+                    image,
+                    filename=(
+                        f"{symbol}_"
+                        f"{timeframe}.png"
+                    ),
+                ),
+                caption=(
+                    query.message.caption
+                    if query.message
+                    and query.message.caption
+                    else ""
+                ),
+                parse_mode="HTML",
             )
         )
 
-        new_photo = types.InputMediaPhoto(
-            media=BufferedInputFile(
-                chart_bytes,
-                filename=(
-                    f"{symbol}_{timeframe}.png"
-                ),
-            ),
-            caption=(
-                query.message.caption
-                or ""
-            ),
-            parse_mode="Markdown",
-        )
-
         await query.message.edit_media(
-            media=new_photo,
+            media=media,
             reply_markup=(
-                get_price_keyboard(
+                chart_keyboard(
                     symbol
                 )
             ),
@@ -1902,11 +2187,12 @@ async def process_chart_timeframe(
     except Exception as exc:
 
         logger.exception(
-            "Chart timeframe update failed"
+            "Chart callback failed"
         )
 
         await query.answer(
-            "❌ چارت SuperEx در دسترس نیست.",
+            "❌ چارت SuperEx "
+            "در دسترس نیست.",
             show_alert=True,
         )
 
@@ -1915,31 +2201,33 @@ async def process_chart_timeframe(
 # WEB SERVER
 # ============================================================
 
-async def health_check(
+async def health_http(
     request: web.Request,
 ):
 
     return web.json_response(
         {
             "status": "ok",
-            "service": "superex-market-bot",
-            "time": int(time.time()),
+            "service":
+                "superex-market-bot",
+            "timestamp":
+                int(time.time()),
         }
     )
 
 
-async def create_web_server():
+async def start_web_server():
 
     app = web.Application()
 
     app.router.add_get(
         "/",
-        health_check,
+        health_http,
     )
 
     app.router.add_get(
         "/health",
-        health_check,
+        health_http,
     )
 
     runner = web.AppRunner(
@@ -1957,7 +2245,8 @@ async def create_web_server():
     await site.start()
 
     logger.info(
-        "🌐 Web server started on port %s",
+        "🌐 Web server started on "
+        "0.0.0.0:%s",
         PORT,
     )
 
@@ -1965,7 +2254,7 @@ async def create_web_server():
 
 
 # ============================================================
-# BOT STARTUP
+# STARTUP
 # ============================================================
 
 async def startup():
@@ -1974,53 +2263,47 @@ async def startup():
 
     try:
 
-        # Remove webhook before polling
         await bot.delete_webhook(
             drop_pending_updates=True
         )
 
         logger.info(
-            "Webhook deleted successfully"
+            "Telegram webhook deleted."
         )
 
     except Exception as exc:
 
         logger.warning(
-            "Could not delete webhook: %s",
+            "Webhook deletion failed: %r",
             exc,
         )
 
 
 # ============================================================
-# BOT SHUTDOWN
+# SHUTDOWN
 # ============================================================
 
 async def shutdown():
 
     logger.info(
-        "Shutting down bot..."
+        "Shutting down..."
     )
 
-    with suppress(
-        Exception
-    ):
-        await close_http_session()
+    await close_http_session()
 
-    with suppress(
-        Exception
-    ):
+    with suppress(Exception):
+
         await bot.session.close()
 
-    with suppress(
-        Exception
-    ):
-        CHART_RENDER_EXECUTOR.shutdown(
+    with suppress(Exception):
+
+        CHART_EXECUTOR.shutdown(
             wait=False,
             cancel_futures=True,
         )
 
     logger.info(
-        "Shutdown complete"
+        "Shutdown complete."
     )
 
 
@@ -2037,11 +2320,11 @@ async def main():
     try:
 
         web_runner = (
-            await create_web_server()
+            await start_web_server()
         )
 
         logger.info(
-            "🚀 Starting Telegram polling..."
+            "🚀 Telegram polling starting..."
         )
 
         await dp.start_polling(
@@ -2050,22 +2333,21 @@ async def main():
                 "message",
                 "callback_query",
             ],
-            handle_signals=True,
         )
 
     except TelegramConflictError:
 
         logger.error(
-            "Telegram Conflict detected. "
-            "Another process is polling "
-            "the same bot token."
+            "Telegram Conflict: "
+            "another instance is using "
+            "getUpdates."
         )
 
-        await notify_admin_error(
-            "telegram_conflict",
+        await notify_admin(
+            "TELEGRAM_CONFLICT",
             (
-                "Another process is using "
-                "getUpdates for this bot."
+                "Another process/instance "
+                "is polling the same bot."
             ),
         )
 
@@ -2075,9 +2357,8 @@ async def main():
 
         if web_runner:
 
-            with suppress(
-                Exception
-            ):
+            with suppress(Exception):
+
                 await web_runner.cleanup()
 
         await shutdown()
@@ -2095,11 +2376,22 @@ if __name__ == "__main__":
             main()
         )
 
-    except (
-        KeyboardInterrupt,
-        SystemExit,
-    ):
+    except KeyboardInterrupt:
 
         logger.info(
-            "🛑 Bot stopped."
+            "Bot stopped by keyboard."
+        )
+
+    except TelegramConflictError:
+
+        logger.error(
+            "Bot stopped because "
+            "another polling instance "
+            "is active."
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Fatal application error."
         )
