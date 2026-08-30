@@ -13,6 +13,7 @@ import mplfinance as mpf
 import matplotlib
 matplotlib.use('Agg') # Prevents GUI crashes on headless servers like Render
 import matplotlib.pyplot as plt
+from PIL import Image, ImageChops
 from concurrent.futures import ThreadPoolExecutor
 
 from aiogram import Bot, Dispatcher, types, F
@@ -307,6 +308,42 @@ async def get_price_data_cached(symbol: str) -> dict:
 # ---------------------------------------------------------
 # Chart Generation
 # ---------------------------------------------------------
+def _autocrop_black_margins(png_bytes: bytes, padding: int = 18, min_width: int = 1100) -> bytes:
+    """
+    حاشیه‌ی خالیِ مشکیِ اضافه دور کل تصویر رو حذف می‌کنه تا چارت داخل قاب
+    پیام تلگرام لبه‌به‌لبه و بزرگ دیده بشه، نه کوچیک و توی عمق.
+
+    برخلاف bbox_inches='tight' (که layout دستیِ subplots_adjust رو
+    نادیده می‌گیره و باعث تداخل امضا با لیبل‌های تاریخ می‌شد)، این تابع
+    کاملاً بعد از رندر و روی خودِ تصویر PNG کار می‌کنه، پس مشکل قبلی رو
+    تکرار نمی‌کنه.
+    """
+    img = Image.open(io.BytesIO(png_bytes)).convert('RGB')
+    background = Image.new('RGB', img.size, (0, 0, 0))
+    diff = ImageChops.difference(img, background)
+    bbox = diff.getbbox()
+
+    if bbox:
+        left, upper, right, lower = bbox
+        left = max(0, left - padding)
+        upper = max(0, upper - padding)
+        right = min(img.width, right + padding)
+        lower = min(img.height, lower + padding)
+        img = img.crop((left, upper, right, lower))
+
+    # تلگرام تصاویر کوچیک رو upscale نمی‌کنه (فقط بزرگ‌ها رو کوچیک می‌کنه)،
+    # پس اگه بعد از کراپ، عرض تصویر خیلی کم بمونه، چارت داخل باکس پیام
+    # کوچیک و دور نمایش داده می‌شه. برای همین حداقل عرض رو تضمین می‌کنیم.
+    if img.width < min_width:
+        scale = min_width / img.width
+        new_size = (min_width, round(img.height * scale))
+        img = img.resize(new_size, Image.LANCZOS)
+
+    out = io.BytesIO()
+    img.save(out, format='PNG')
+    return out.getvalue()
+
+
 def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     """
     بخش سنگین و CPU-bound رسم چارت (matplotlib). این تابع sync است و
@@ -329,16 +366,19 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
         type='candle',
         style=CHART_STYLE,
         volume=False,
-        title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
+        title=f"{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
         ylabel='Price (USDT)',   # لیبل محور قیمت، مطابق تصویر مرجع
         datetime_format=date_format,
         xrotation=x_rotation,
         tight_layout=False,
         returnfig=True,
-        figsize=(12, 7.4)   # بزرگ‌تر شده تا با اندازه‌ی سایر ربات‌ها هم‌خوان باشه
+        figsize=(13, 7.8)   # بزرگ‌تر شده تا با اندازه‌ی سایر ربات‌ها هم‌خوان باشه
     )
 
-    fig.subplots_adjust(top=0.90, bottom=0.16, left=0.09, right=0.96)
+    # حاشیه‌های خیلی تنگ‌تر شدن (نسبت به قبل) تا چارت واقعی بیشترین فضای
+    # ممکن رو از کل بوم تصویر پر کنه و به‌جای «کوچیک و توی عمق»، لبه‌به‌لبه
+    # و نزدیک دیده بشه - دقیقاً مثل تصویر مرجع.
+    fig.subplots_adjust(top=0.94, bottom=0.11, left=0.065, right=0.985)
 
     # قاب/کادر نازک دور کل چارت: مطمئن می‌شیم هر ۴ لبه (spine) نمایش داده
     # بشن و رنگ یکسان داشته باشن، چون بعضی استایل‌های پایه‌ی mplfinance
@@ -351,7 +391,7 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
     fig.text(
-        0.5, 0.025, watermark_text,
+        0.5, 0.02, watermark_text,
         ha='center', va='center', fontsize=10.5, color='#9a9a9a', fontweight='normal',
         transform=fig.transFigure
     )
@@ -359,11 +399,12 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     buf = io.BytesIO()
     try:
         fig.savefig(
-            buf, dpi=130,
+            buf, dpi=140,
             bbox_inches=None, pad_inches=0,
             facecolor=fig.get_facecolor(), edgecolor='none'
         )
-        return buf.getvalue()
+        # حذف حاشیه‌ی خالی مشکی اضافه دور تصویر (توضیح در _autocrop_black_margins)
+        return _autocrop_black_margins(buf.getvalue(), padding=10)
     finally:
         buf.close()
         # نکته‌ی مهم: در نسخه‌ی قبلی figure ها هیچ‌وقت close نمی‌شدند،
