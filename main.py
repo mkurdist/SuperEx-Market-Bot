@@ -164,7 +164,7 @@ async def fetch_price_data(symbol: str) -> dict:
 async def get_currency_id(symbol: str) -> int:
     """
     Fetches the internal currencyId for a given symbol from SuperEx.
-    Required for the official REST Kline endpoint.
+    Uses a robust multi-key search to prevent JSON parsing errors.
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     url = f"https://api.superexchang.com/api/free-spot/v3/symbols?currency={base_symbol}"
@@ -173,14 +173,41 @@ async def get_currency_id(symbol: str) -> int:
         try:
             async with session.get(url, headers=get_superex_headers(), timeout=5.0) as response:
                 if response.status == 200:
-                    res_data = await response.json()
-                    items = res_data.get("data", [])
-                    if isinstance(items, dict) and "list" in items:
-                        items = items["list"]
+                    res_json = await response.json()
+                    data = res_json.get("data")
                     
+                    # 1. Locate the actual list of items
+                    items = []
+                    if isinstance(data, list):
+                        items = data
+                    elif isinstance(data, dict):
+                        # Try to find the list in common nested keys
+                        for key in ["list", "items", "rows", "data"]:
+                            if isinstance(data.get(key), list):
+                                items = data[key]
+                                break
+                    
+                    # 2. Iterate through items and find the matching currency
                     for item in items:
-                        if isinstance(item, dict) and item.get("currency", "").lower() == base_symbol:
-                            return int(item.get("currencyId", 0))
+                        if not isinstance(item, dict):
+                            continue
+                        
+                        # Check multiple possible keys for the symbol name
+                        candidates = [
+                            str(item.get("currency", "")),
+                            str(item.get("currencyName", "")),
+                            str(item.get("name", "")),
+                            str(item.get("symbol", ""))
+                        ]
+                        
+                        for candidate in candidates:
+                            if candidate.lower() == base_symbol:
+                                cid = item.get("currencyId")
+                                if cid is not None:
+                                    return int(cid)
+                                    
+                    # 3. Log a snippet of the response if the symbol is not found for debugging
+                    logging.warning(f"Symbol {base_symbol} not found in parsed items. Raw data snippet: {str(data)[:200]}")
         except Exception as e:
             logging.error(f"Error fetching currencyId: {e}")
             
