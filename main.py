@@ -4,8 +4,6 @@ import io
 import time
 import uuid
 import json
-import base64
-import gzip
 import logging
 import aiohttp
 import pandas as pd
@@ -34,11 +32,11 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 TIMEFRAME_MAP = {
-    "1m": 60,
-    "15m": 900,
-    "1h": 3600,
-    "4h": 14400,
-    "1d": 86400
+    "1m": "1m",
+    "15m": "15m",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d"
 }
 
 # ---------------------------------------------------------
@@ -159,49 +157,25 @@ async def fetch_price_data(symbol: str) -> dict:
     logging.warning(f"Symbol {symbol} not found on SuperEx.")
     return {"error": "Symbol not found on SuperEx."}
 
-async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
+async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
     """
-    Fetches real candlestick data using standard SuperEx market REST endpoint.
-    Includes response body logging for precise debugging.
+    Fetches real candlestick data from Binance public API to render high-speed charts without blocking.
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
+    binance_symbol = f"{base_symbol.upper()}USDT"
     
-    tf_map = {
-        "1m": "1min",
-        "15m": "15min",
-        "1h": "1hour",
-        "4h": "4hour",
-        "1d": "1day"
-    }
-    resolution = tf_map.get(timeframe, "1hour")
-    
-    url = f"https://api.superexchang.com/api/v1/market/kline?symbol={base_symbol}_usdt&resolution={resolution}&limit=60"
+    interval = TIMEFRAME_MAP.get(timeframe, "1h")
+    url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit=60"
     
     parsed_data = []
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, headers=get_superex_headers(), timeout=5.0) as response:
-                body_text = await response.text()
+            async with session.get(url, timeout=5.0) as response:
                 if response.status == 200:
-                    res_json = json.loads(body_text)
-                    items = res_json.get("data", [])
-                    
-                    if not items and isinstance(res_json, list):
-                        items = res_json
-                        
+                    items = await response.json()
                     for item in items:
-                        if isinstance(item, dict):
-                            t = item.get("time", item.get("t", item.get("timestamp", 0)))
-                            o = item.get("open", item.get("o", 0))
-                            h = item.get("high", item.get("h", 0))
-                            l = item.get("low", item.get("l", 0))
-                            c = item.get("close", item.get("c", 0))
-                            v = item.get("volume", item.get("v", 0))
-                        elif isinstance(item, list) and len(item) >= 6:
-                            t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
-                        else:
-                            continue
-
+                        # Binance kline format: [Open time, Open, High, Low, Close, Volume, Close time, ...]
+                        t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
                         parsed_data.append({
                             "Date": pd.to_datetime(int(t), unit="ms"),
                             "Open": float(o),
@@ -211,9 +185,9 @@ async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
                             "Volume": float(v)
                         })
                 else:
-                    logging.warning(f"SuperEx Kline REST failed with status {response.status}: {body_text[:200]}")
+                    logging.warning(f"Binance Kline API returned status {response.status}")
         except Exception as e:
-            logging.error(f"SuperEx Real REST Kline error for {symbol}: {e}")
+            logging.error(f"Binance Kline error for {symbol}: {e}")
             
     return parsed_data
 
@@ -292,17 +266,17 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
-    Generates a professional, TradingView-style candlestick chart using real SuperEx REST API data.
+    Generates a professional, TradingView-style candlestick chart.
     """
     cache_key = (symbol.upper(), timeframe)
     cached = _cache_get(CHART_CACHE, cache_key, CHART_CACHE_TTL)
     if cached is not None:
         return cached
 
-    parsed_data = await fetch_superex_kline_real_rest(symbol, timeframe)
+    parsed_data = await fetch_binance_kline(symbol, timeframe)
     
     if not parsed_data:
-        raise ValueError("No chart data available from SuperEx REST API.")
+        raise ValueError("No chart data available from API.")
 
     df = pd.DataFrame(parsed_data)
     df.set_index("Date", inplace=True)
