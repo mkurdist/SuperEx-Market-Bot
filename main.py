@@ -264,7 +264,7 @@ async def get_price_data_cached(symbol: str) -> dict:
 # ---------------------------------------------------------
 def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     """
-    Renders the candlestick chart synchronously inside a thread pool with custom margins.
+    Renders the candlestick chart with tight bounding and zero outer margins.
     """
     if timeframe == "1d":
         date_format = '%b'
@@ -278,44 +278,40 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
         type='candle',
         style=CHART_STYLE,
         volume=False,
-        title=f"\n{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
+        title=f"{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
         ylabel='Price (USDT)',   
         datetime_format=date_format,
         xrotation=x_rotation,
-        tight_layout=False,
+        tight_layout=True,
         returnfig=True,
-        figsize=(12, 7.4)   
+        figsize=(10, 6)   
     )
 
-    # تنظیم فاصله‌گذاری جدید جهت حذف حاشیه‌های اضافی و نزدیک کردن عنوان به کادر
-    fig.subplots_adjust(top=0.93, bottom=0.08, left=0.08, right=0.96)
+    ax = axlist[0]
+    
+    # تنظیم فاصله عنوان تا دقیقاً بالای کادر قرار گیرد
+    ax.set_title(ax.get_title(), pad=10, fontsize=13, color='#e6e6e6')
 
-    for ax in axlist:
-        for spine in ax.spines.values():
-            spine.set_visible(True)
-            spine.set_color('#555555')
-            spine.set_linewidth(0.8)
-
-    # جابجایی واترمارک به لبه پایینی داخل کادر نمودار
+    # اضافه کردن واترمارک دقیقاً داخل لبه پایینی کادر نمودار
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
-    fig.text(
-        0.5, 0.04, watermark_text,
-        ha='center', va='center', fontsize=10, color='#9a9a9a', fontweight='normal',
-        transform=fig.transFigure
+    ax.text(
+        0.5, 0.03, watermark_text,
+        transform=ax.transAxes,
+        ha='center', va='bottom', fontsize=9.5, color='#9a9a9a', fontweight='normal'
     )
 
     buf = io.BytesIO()
     try:
+        # استفاده از bbox_inches='tight' برای حذف کامل حاشیه‌های سیاه اضافی دور تصویر
         fig.savefig(
             buf, dpi=130,
-            bbox_inches=None, pad_inches=0,
+            bbox_inches='tight', pad_inches=0.1,
             facecolor=fig.get_facecolor(), edgecolor='none'
         )
         return buf.getvalue()
     finally:
         buf.close()
         plt.close(fig)
-
 
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
