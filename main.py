@@ -195,8 +195,6 @@ async def fetch_coingecko_market_chart(symbol: str) -> list:
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     
-    # CoinGecko requires coin IDs, mapping common ones or searching via coin list can be done,
-    # but here we use a direct market chart endpoint for major tokens or search fallback.
     search_url = f"https://api.coingecko.com/api/v3/search?query={base_symbol}"
     
     parsed_data = []
@@ -235,14 +233,12 @@ async def fetch_kline_with_fallback(symbol: str, timeframe: str) -> list:
     """
     Tries Binance first. If it fails or returns no data, falls back to CoinGecko.
     """
-    # 1. Try Binance
     data = await fetch_binance_kline(symbol, timeframe)
     if data:
         return data
         
     logging.info(f"Binance failed or no data for {symbol}, falling back to CoinGecko...")
     
-    # 2. Fallback to CoinGecko
     data = await fetch_coingecko_market_chart(symbol)
     return data
 
@@ -268,7 +264,7 @@ async def get_price_data_cached(symbol: str) -> dict:
 # ---------------------------------------------------------
 def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     """
-    Renders the candlestick chart synchronously inside a thread pool.
+    Renders the candlestick chart synchronously inside a thread pool with custom margins.
     """
     if timeframe == "1d":
         date_format = '%b'
@@ -291,7 +287,8 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
         figsize=(12, 7.4)   
     )
 
-    fig.subplots_adjust(top=0.90, bottom=0.16, left=0.09, right=0.96)
+    # تنظیم فاصله‌گذاری جدید جهت حذف حاشیه‌های اضافی و نزدیک کردن عنوان به کادر
+    fig.subplots_adjust(top=0.93, bottom=0.08, left=0.08, right=0.96)
 
     for ax in axlist:
         for spine in ax.spines.values():
@@ -299,10 +296,11 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
             spine.set_color('#555555')
             spine.set_linewidth(0.8)
 
+    # جابجایی واترمارک به لبه پایینی داخل کادر نمودار
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
     fig.text(
-        0.5, 0.025, watermark_text,
-        ha='center', va='center', fontsize=10.5, color='#9a9a9a', fontweight='normal',
+        0.5, 0.04, watermark_text,
+        ha='center', va='center', fontsize=10, color='#9a9a9a', fontweight='normal',
         transform=fig.transFigure
     )
 
