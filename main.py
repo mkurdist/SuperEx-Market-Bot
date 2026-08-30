@@ -128,9 +128,6 @@ def get_superex_headers() -> dict:
     }
 
 async def fetch_price_data(symbol: str) -> dict:
-    """
-    Fetches the latest 24h ticker data directly using the SuperEx resource API.
-    """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     url = f"https://api.superexchang.com/resource/v3/public/currency/new?currency={base_symbol}"
     
@@ -142,13 +139,25 @@ async def fetch_price_data(symbol: str) -> dict:
                     data_obj = res_data.get("data", {})
                     
                     if data_obj and data_obj.get("newPrice"):
+                        price = float(data_obj.get("newPrice", "0.0"))
+                        sum_number = float(data_obj.get("sumNumber", "0.0"))
+                        
+                        # ضرب حجم توکنی در قیمت لحظه‌ای برای به دست آوردن حجم دلاری (USDT)
+                        volume_usdt = price * sum_number
+                        
+                        # فرمت‌دهی عدد برای نمایش زیباتر (مثلا جداکننده هزارگان یا اعشار مناسب)
+                        if volume_usdt >= 1000:
+                            formatted_vol = f"{volume_usdt:,.2f}"
+                        else:
+                            formatted_vol = f"{volume_usdt:.4f}"
+
                         return {
                             "symbol": base_symbol.upper(),
                             "price": str(data_obj.get("newPrice", "0.0")),
                             "change_24h": str(data_obj.get("change", "0.0")),
                             "high": str(data_obj.get("maxPrice", "0.0")),
                             "low": str(data_obj.get("minPrice", "0.0")),
-                            "volume": str(data_obj.get("sumNumber", "0.0")),
+                            "volume": formatted_vol,  # حالا این مقدار حجم دلاری است
                             "source": "SuperEx"
                         }
         except Exception as e:
