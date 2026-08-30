@@ -159,13 +159,13 @@ async def fetch_price_data(symbol: str) -> dict:
 
 async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
     """
-    Fetches real candlestick data from Binance public API to render high-speed charts without blocking.
+    Fetches real candlestick data from Binance public API (using vision endpoint to avoid 451 errors).
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     binance_symbol = f"{base_symbol.upper()}USDT"
     
     interval = TIMEFRAME_MAP.get(timeframe, "1h")
-    url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit=60"
+    url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit=60"
     
     parsed_data = []
     async with aiohttp.ClientSession() as session:
@@ -173,23 +173,78 @@ async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
             async with session.get(url, timeout=5.0) as response:
                 if response.status == 200:
                     items = await response.json()
-                    for item in items:
-                        # Binance kline format: [Open time, Open, High, Low, Close, Volume, Close time, ...]
-                        t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
-                        parsed_data.append({
-                            "Date": pd.to_datetime(int(t), unit="ms"),
-                            "Open": float(o),
-                            "High": float(h),
-                            "Low": float(l),
-                            "Close": float(c),
-                            "Volume": float(v)
-                        })
-                else:
-                    logging.warning(f"Binance Kline API returned status {response.status}")
+                    if isinstance(items, list) and items:
+                        for item in items:
+                            t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
+                            parsed_data.append({
+                                "Date": pd.to_datetime(int(t), unit="ms"),
+                                "Open": float(o),
+                                "High": float(h),
+                                "Low": float(l),
+                                "Close": float(c),
+                                "Volume": float(v)
+                            })
         except Exception as e:
             logging.error(f"Binance Kline error for {symbol}: {e}")
             
     return parsed_data
+
+async def fetch_coingecko_market_chart(symbol: str) -> list:
+    """
+    Fallback function: Fetches historical chart data from CoinGecko if Binance fails or symbol is missing.
+    """
+    base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
+    
+    # CoinGecko requires coin IDs, mapping common ones or searching via coin list can be done,
+    # but here we use a direct market chart endpoint for major tokens or search fallback.
+    search_url = f"https://api.coingecko.com/api/v3/search?query={base_symbol}"
+    
+    parsed_data = []
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(search_url, timeout=5.0) as resp:
+                if resp.status == 200:
+                    search_data = await resp.json()
+                    coins = search_data.get("coins", [])
+                    if coins:
+                        coin_id = coins[0].get("id")
+                        chart_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=1"
+                        async with session.get(chart_url, timeout=5.0) as chart_resp:
+                            if chart_resp.status == 200:
+                                chart_data = await chart_resp.json()
+                                prices = chart_data.get("prices", [])
+                                volumes = chart_data.get("total_volumes", [])
+                                
+                                for i, p_item in enumerate(prices):
+                                    t, price = p_item[0], p_item[1]
+                                    vol = volumes[i][1] if i < len(volumes) else 0.0
+                                    parsed_data.append({
+                                        "Date": pd.to_datetime(int(t), unit="ms"),
+                                        "Open": float(price),
+                                        "High": float(price),
+                                        "Low": float(price),
+                                        "Close": float(price),
+                                        "Volume": float(vol)
+                                    })
+        except Exception as e:
+            logging.error(f"CoinGecko fallback error for {symbol}: {e}")
+            
+    return parsed_data
+
+async def fetch_kline_with_fallback(symbol: str, timeframe: str) -> list:
+    """
+    Tries Binance first. If it fails or returns no data, falls back to CoinGecko.
+    """
+    # 1. Try Binance
+    data = await fetch_binance_kline(symbol, timeframe)
+    if data:
+        return data
+        
+    logging.info(f"Binance failed or no data for {symbol}, falling back to CoinGecko...")
+    
+    # 2. Fallback to CoinGecko
+    data = await fetch_coingecko_market_chart(symbol)
+    return data
 
 # ---------------------------------------------------------
 # Cached wrappers around the exchange query methods
@@ -266,17 +321,17 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     """
-    Generates a professional, TradingView-style candlestick chart.
+    Generates a professional candlestick chart using Binance with CoinGecko fallback.
     """
     cache_key = (symbol.upper(), timeframe)
     cached = _cache_get(CHART_CACHE, cache_key, CHART_CACHE_TTL)
     if cached is not None:
         return cached
 
-    parsed_data = await fetch_binance_kline(symbol, timeframe)
+    parsed_data = await fetch_kline_with_fallback(symbol, timeframe)
     
     if not parsed_data:
-        raise ValueError("No chart data available from API.")
+        raise ValueError("No chart data available from any API provider.")
 
     df = pd.DataFrame(parsed_data)
     df.set_index("Date", inplace=True)
