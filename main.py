@@ -225,61 +225,54 @@ async def fetch_price_data(symbol: str) -> dict:
 
 async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
     """
-    Connects to SuperEx WebSocket using the correct official socket endpoint.
+    دریافت داده‌های کندل از طریق REST API صرافی SuperEx به جای WebSocket
+    تا خطاهای قطعی و اتصال روی سرورهای ابری (Render) کاملاً برطرف شود.
     """
-    ws_url = "wss://api.superexchang.com/socket/ws"
-    tf_seconds = TIMEFRAME_MAP.get(timeframe, 3600)
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
-    topic = f"spot/candle{tf_seconds}:{base_symbol}_usdt"
     
-    ws_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Origin": "https://www.superex.com"
+    # مپ کردن تایم‌فریم‌های تلگرام به پارامترهای پشتیبانی‌شده‌ی API صرافی
+    tf_map_api = {
+        "1m": "1min",
+        "15m": "15min",
+        "1h": "1hour",
+        "4h": "4hour",
+        "1d": "1day"
     }
+    resolution = tf_map_api.get(timeframe, "1hour")
+    
+    url = f"https://api.superexchang.com/resource/v3/public/kline?symbol={base_symbol}_usdt&resolution={resolution}&limit=60"
     
     parsed_data = []
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(ws_url, headers=ws_headers, timeout=5.0) as ws:
-                req_msg = {"op": "req", "action": "action", "args": [topic], "to": 300}
-                await ws.send_json(req_msg)
-                
-                for _ in range(10):
-                    msg = await ws.receive(timeout=3.0)
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        if msg.data == 'ping':
-                            await ws.send_str('pong')
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=get_superex_headers(), timeout=5.0) as response:
+                if response.status == 200:
+                    res_json = await response.json()
+                    items = res_json.get("data", [])
+                    for item in items:
+                        if isinstance(item, dict):
+                            t = item.get("time", item.get("t", 0))
+                            o = item.get("open", item.get("o", 0))
+                            h = item.get("high", item.get("h", 0))
+                            l = item.get("low", item.get("l", 0))
+                            c = item.get("close", item.get("c", 0))
+                            v = item.get("volume", item.get("v", 0))
+                        elif isinstance(item, list) and len(item) >= 6:
+                            t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
+                        else:
                             continue
-                        
-                        try:
-                            b64_data = msg.data + "=" * ((4 - len(msg.data) % 4) % 4)
-                            uncompressed = gzip.decompress(base64.b64decode(b64_data)).decode('utf-8')
-                            data_json = json.loads(uncompressed)
-                            
-                            if data_json.get("action") == "action":
-                                klines = data_json.get("data", [])
-                                for item in klines:
-                                    if isinstance(item, dict):
-                                        t = item.get("time", 0)
-                                        o = item.get("open", 0)
-                                        h = item.get("high", 0)
-                                        l = item.get("low", 0)
-                                        c = item.get("close", 0)
-                                        v = item.get("volume", 0)
-                                        
-                                        parsed_data.append({
-                                            "Date": pd.to_datetime(int(t), unit="ms"),
-                                            "Open": float(o), "High": float(h),
-                                            "Low": float(l), "Close": float(c),
-                                            "Volume": float(v)
-                                        })
-                                if parsed_data:
-                                    return parsed_data
-                        except Exception:
-                            pass
-    except Exception as e:
-        logging.error(f"SuperEx WS Kline error: {e}")
-        
+
+                        parsed_data.append({
+                            "Date": pd.to_datetime(int(t), unit="ms"),
+                            "Open": float(o),
+                            "High": float(h),
+                            "Low": float(l),
+                            "Close": float(c),
+                            "Volume": float(v)
+                        })
+        except Exception as e:
+            logging.error(f"SuperEx REST Kline error for {symbol}: {e}")
+            
     return parsed_data
 
 # ---------------------------------------------------------
@@ -423,10 +416,10 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     if not parsed_data:
         # دیگه فالبک به بایننس نداریم؛ فقط گزارش خطا برای ادمین + بالا بردن exception
         # تا کاربر پیام «چارت در دسترس نیست» رو ببینه.
-        logging.warning(f"SuperEx WS failed for {symbol} chart, timeframe={timeframe}.")
+        logging.warning(f"SuperEx REST failed for {symbol} chart, timeframe={timeframe}.")
         await notify_admin_error(
             "superex_chart_no_data",
-            f"دریافت دیتای چارت `{symbol}` (تایم‌فریم `{timeframe}`) از SuperEx WS ناموفق بود."
+            f"دریافت دیتای چارت `{symbol}` (تایم‌فریم `{timeframe}`) از SuperEx REST API ناموفق بود."
         )
         raise ValueError("چارت SuperEx در دسترس نیست.")
 
