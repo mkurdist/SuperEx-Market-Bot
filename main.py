@@ -50,7 +50,7 @@ ADMIN_CHAT_ID = int(
 
 SUPEREX_API_BASE = os.getenv(
     "SUPEREX_API_BASE",
-    "https://api.superexchang.com",
+    "https://api.superexchang.com/api",
 ).rstrip("/")
 
 
@@ -276,10 +276,9 @@ def superex_headers():
 
     return {
 
-        "Accept": "*/*",
+        "Accept": "application/json",
 
-        "Accept-Language":
-            "en-US,en;q=0.9",
+        "language": "en",
 
         "User-Agent":
             (
@@ -455,10 +454,19 @@ async def superex_get(
 
         await create_http_session()
 
-    url = (
-        SUPEREX_API_BASE
-        + path
-    )
+    if path.startswith("/resource"):
+
+        url = (
+            SUPEREX_API_BASE.replace("/api", "")
+            + path
+        )
+
+    else:
+
+        url = (
+            SUPEREX_API_BASE
+            + path
+        )
 
     last_error = None
 
@@ -761,12 +769,12 @@ async def get_currency_id(
         return cached
 
     path = (
-        "/api/free-spot/v3/symbols"
+        "/free-spot/v3/symbols"
     )
 
     params = {
         "currency":
-            symbol,
+            symbol.lower(),
     }
 
     response = await superex_get(
@@ -1116,6 +1124,124 @@ def parse_kline_row(
 
 
 # ============================================================
+# BINANCE FALLBACK
+# ============================================================
+
+async def fetch_binance_kline(
+    symbol: str,
+    timeframe: str,
+) -> list:
+
+    global http_session
+
+    if (
+        http_session is None
+        or http_session.closed
+    ):
+
+        await create_http_session()
+
+    binance_symbol = (
+        symbol.upper()
+        + "USDT"
+    )
+
+    url = (
+        "https://api.binance.com"
+        "/api/v3/klines"
+    )
+
+    params = {
+
+        "symbol":
+            binance_symbol,
+
+        "interval":
+            timeframe,
+
+        "limit":
+            KLINE_LIMIT,
+    }
+
+    logger.info(
+        "BINANCE FALLBACK REQUEST | "
+        "symbol=%s | "
+        "timeframe=%s",
+        binance_symbol,
+        timeframe,
+    )
+
+    async with (
+        http_session.get(
+            url,
+            params=params,
+        )
+    ) as response:
+
+        if response.status != 200:
+
+            body = (
+                await response.text()
+            )
+
+            raise RuntimeError(
+                f"Binance HTTP {response.status}: "
+                f"{body[:200]}"
+            )
+
+        data = (
+            await response.json()
+        )
+
+    if not isinstance(
+        data,
+        list,
+    ):
+
+        raise RuntimeError(
+            "Binance returned invalid data"
+        )
+
+    records = []
+
+    for row in data:
+
+        records.append(
+            {
+                "Date":
+                    pd.to_datetime(
+                        row[0],
+                        unit="ms",
+                        utc=True,
+                    ),
+
+                "Open":
+                    float(row[1]),
+
+                "High":
+                    float(row[2]),
+
+                "Low":
+                    float(row[3]),
+
+                "Close":
+                    float(row[4]),
+
+                "Volume":
+                    float(row[5]),
+            }
+        )
+
+    if not records:
+
+        raise RuntimeError(
+            "Binance returned empty klines"
+        )
+
+    return records
+
+
+# ============================================================
 # KLINE
 # ============================================================
 
@@ -1198,197 +1324,217 @@ async def fetch_kline(
 
             return cached
 
-        currency_id = (
-            await get_currency_id(
-                symbol
+        records = None
+
+        try:
+
+            currency_id = (
+                await get_currency_id(
+                    symbol
+                )
             )
-        )
 
-        time_type = (
-            TIMEFRAME_SECONDS[
-                timeframe
-            ]
-        )
+            time_type = (
+                TIMEFRAME_SECONDS[
+                    timeframe
+                ]
+            )
 
-        path = (
-            "/api/free-spot/v3/klines"
-        )
+            path = (
+                "/free-spot/v3/klines"
+            )
 
-        params = {
+            params = {
 
-            "currencyId":
+                "currencyId":
+                    currency_id,
+
+                "timeType":
+                    time_type,
+
+                "limit":
+                    KLINE_LIMIT,
+            }
+
+            logger.info(
+                "KLINE REQUEST | "
+                "symbol=%s | "
+                "currencyId=%s | "
+                "timeframe=%s | "
+                "timeType=%s",
+                symbol,
                 currency_id,
-
-            "timeType":
+                timeframe,
                 time_type,
-
-            "limit":
-                KLINE_LIMIT,
-        }
-
-        logger.info(
-            "KLINE REQUEST | "
-            "symbol=%s | "
-            "currencyId=%s | "
-            "timeframe=%s | "
-            "timeType=%s",
-            symbol,
-            currency_id,
-            timeframe,
-            time_type,
-        )
-
-        response = await superex_get(
-            path,
-            params,
-        )
-
-        logger.info(
-            "KLINE RAW RESPONSE | %s",
-            str(response)[:6000],
-        )
-
-        if not isinstance(
-            response,
-            dict,
-        ):
-
-            raise RuntimeError(
-                "Kline response is not "
-                "a JSON object."
             )
 
-        code = response.get(
-            "code"
-        )
-
-        if (
-            code is not None
-            and str(code)
-            not in (
-                "0",
-                "200",
-            )
-        ):
-
-            raise RuntimeError(
-                "SuperEx Kline error: "
-                f"code={code}, "
-                f"msg={response.get('msg')}"
+            response = await superex_get(
+                path,
+                params,
             )
 
-        data = response.get(
-            "data"
-        )
+            logger.info(
+                "KLINE RAW RESPONSE | %s",
+                str(response)[:6000],
+            )
 
-        if isinstance(
-            data,
-            dict,
-        ):
-
-            for key in (
-                "data",
-                "list",
-                "rows",
-                "items",
-                "klines",
+            if not isinstance(
+                response,
+                dict,
             ):
 
-                if isinstance(
-                    data.get(key),
-                    list,
-                ):
-
-                    data = data[key]
-
-                    break
-
-        if not isinstance(
-            data,
-            list,
-        ):
-
-            raise RuntimeError(
-                "SuperEx Kline data "
-                "is not a list."
-            )
-
-        if not data:
-
-            raise RuntimeError(
-                "SuperEx returned "
-                "empty Kline data."
-            )
-
-        records = []
-
-        for row in data:
-
-            parsed = (
-                parse_kline_row(row)
-            )
-
-            if parsed:
-
-                records.append(
-                    parsed
+                raise RuntimeError(
+                    "Kline response is not "
+                    "a JSON object."
                 )
 
-        if not records:
-
-            raise RuntimeError(
-                "Kline rows were received "
-                "but none could be parsed."
+            code = response.get(
+                "code"
             )
 
-        df = pd.DataFrame(
-            records
-        )
+            if (
+                code is not None
+                and str(code)
+                not in (
+                    "0",
+                    "200",
+                )
+            ):
 
-        df = (
-            df.drop_duplicates(
-                subset=["Date"],
-                keep="last",
-            )
-            .sort_values(
-                "Date"
-            )
-        )
+                raise RuntimeError(
+                    "SuperEx Kline error: "
+                    f"code={code}, "
+                    f"msg={response.get('msg')}"
+                )
 
-        df = df[
-            [
-                "Date",
-                "Open",
-                "High",
-                "Low",
-                "Close",
-                "Volume",
+            data = response.get(
+                "data"
+            )
+
+            if isinstance(
+                data,
+                dict,
+            ):
+
+                for key in (
+                    "data",
+                    "list",
+                    "rows",
+                    "items",
+                    "klines",
+                ):
+
+                    if isinstance(
+                        data.get(key),
+                        list,
+                    ):
+
+                        data = data[key]
+
+                        break
+
+            if not isinstance(
+                data,
+                list,
+            ):
+
+                raise RuntimeError(
+                    "SuperEx Kline data "
+                    "is not a list."
+                )
+
+            if not data:
+
+                raise RuntimeError(
+                    "SuperEx returned "
+                    "empty Kline data."
+                )
+
+            records_temp = []
+
+            for row in data:
+
+                parsed = (
+                    parse_kline_row(row)
+                )
+
+                if parsed:
+
+                    records_temp.append(
+                        parsed
+                    )
+
+            if not records_temp:
+
+                raise RuntimeError(
+                    "Kline rows were received "
+                    "but none could be parsed."
+                )
+
+            df = pd.DataFrame(
+                records_temp
+            )
+
+            df = (
+                df.drop_duplicates(
+                    subset=["Date"],
+                    keep="last",
+                )
+                .sort_values(
+                    "Date"
+                )
+            )
+
+            df = df[
+                [
+                    "Date",
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Volume",
+                ]
             ]
-        ]
 
-        if df.empty:
+            if df.empty:
 
-            raise RuntimeError(
-                "Kline DataFrame is empty."
+                raise RuntimeError(
+                    "Kline DataFrame is empty."
+                )
+
+            logger.info(
+                "KLINE SUCCESS | "
+                "symbol=%s | "
+                "timeframe=%s | "
+                "candles=%s | "
+                "first=%s | "
+                "last=%s",
+                symbol,
+                timeframe,
+                len(df),
+                df.iloc[0]["Date"],
+                df.iloc[-1]["Date"],
             )
 
-        logger.info(
-            "KLINE SUCCESS | "
-            "symbol=%s | "
-            "timeframe=%s | "
-            "candles=%s | "
-            "first=%s | "
-            "last=%s",
-            symbol,
-            timeframe,
-            len(df),
-            df.iloc[0]["Date"],
-            df.iloc[-1]["Date"],
-        )
+            records = df.to_dict(
+                orient="records"
+            )
 
-        records = df.to_dict(
-            orient="records"
-        )
+        except Exception as exc:
+
+            logger.warning(
+                "SuperEx Kline failed for %s. "
+                "Falling back to Binance. Error: %r",
+                symbol,
+                exc,
+            )
+
+            records = (
+                await fetch_binance_kline(
+                    symbol,
+                    timeframe,
+                )
+            )
 
         async with CACHE_LOCK:
 
