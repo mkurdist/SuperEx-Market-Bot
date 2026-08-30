@@ -225,9 +225,9 @@ async def fetch_price_data(symbol: str) -> dict:
 
 async def fetch_superex_kline_ws(symbol: str, timeframe: str) -> list:
     """
-    Connects to SuperEx WebSocket, sends the kline request, decodes the GZIP/Base64 response.
+    Connects to SuperEx WebSocket using the correct official socket endpoint.
     """
-    ws_url = "wss://api.superexchang.com/ws"
+    ws_url = "wss://api.superexchang.com/socket/ws"
     tf_seconds = TIMEFRAME_MAP.get(timeframe, 3600)
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     topic = f"spot/candle{tf_seconds}:{base_symbol}_usdt"
