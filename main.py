@@ -161,8 +161,8 @@ async def fetch_price_data(symbol: str) -> dict:
 
 async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
     """
-    Fetches real candlestick (OHLCV) data using SuperEx spot REST API.
-    Bypasses WebSocket cloud restrictions on Render.
+    Fetches real candlestick data using standard SuperEx market REST endpoint.
+    Includes response body logging for precise debugging.
     """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     
@@ -175,14 +175,15 @@ async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
     }
     resolution = tf_map.get(timeframe, "1hour")
     
-    url = f"https://api.superexchang.com/spot/spot/kline?symbol={base_symbol}_usdt&resolution={resolution}&limit=60"
+    url = f"https://api.superexchang.com/api/v1/market/kline?symbol={base_symbol}_usdt&resolution={resolution}&limit=60"
     
     parsed_data = []
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=get_superex_headers(), timeout=5.0) as response:
+                body_text = await response.text()
                 if response.status == 200:
-                    res_json = await response.json()
+                    res_json = json.loads(body_text)
                     items = res_json.get("data", [])
                     
                     if not items and isinstance(res_json, list):
@@ -209,6 +210,8 @@ async def fetch_superex_kline_real_rest(symbol: str, timeframe: str) -> list:
                             "Close": float(c),
                             "Volume": float(v)
                         })
+                else:
+                    logging.warning(f"SuperEx Kline REST failed with status {response.status}: {body_text[:200]}")
         except Exception as e:
             logging.error(f"SuperEx Real REST Kline error for {symbol}: {e}")
             
