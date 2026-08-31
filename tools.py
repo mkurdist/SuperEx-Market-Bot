@@ -28,18 +28,30 @@ tools.py
 """
 
 import asyncio
+import io
 import logging
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 import aiohttp
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
 from aiogram import Router, types
+from aiogram.types import BufferedInputFile
 
 logger = logging.getLogger("tools")
 
 tools_router = Router(name="tools_router")
+
+# Executor مخصوص رندر چارت طلای جهانی - جدا از main.py تا این فایل کاملاً ایزوله بماند
+_CHART_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gold-chart")
 
 # ===========================================================
 # Shared HTTP / formatting helpers
@@ -123,7 +135,7 @@ FOOTER = "\n<i>@SuperExFa_bot</i>"
 
 
 # ===========================================================
-# 1) Gold & Coin Service
+# 1) Gold Service — فقط طلای ۱۸ عیار + انس جهانی + چارت طلای جهانی
 # ===========================================================
 GOLD_KEYWORDS = ["طلا", "سکه", "قیمت طلا", "قیمت سکه", "مظنه", "ابشده", "آبشده", "gold"]
 
@@ -136,17 +148,6 @@ TGJU_MIRRORS = [
 TGJU_HEADERS = {
     **DEFAULT_HEADERS,
     "Referer": "https://www.tgju.org/",
-}
-
-GOLD_ITEMS = {
-    "geram18": "طلای ۱۸ عیار",
-    "geram24": "طلای ۲۴ عیار",
-    "mesghal": "مثقال طلا (آبشده)",
-    "sekee": "سکه امامی",
-    "sekeb": "سکه بهار آزادی",
-    "nim": "نیم سکه",
-    "rob": "ربع سکه",
-    "gerami": "سکه گرمی",
 }
 
 # کش کوتاه‌مدت مشترک بین سرویس طلا و دلار (هر دو از یک اندپوینت tgju می‌خوانند)
@@ -177,50 +178,134 @@ def is_gold_trigger(message: types.Message) -> bool:
     return any(kw.lower() in lowered for kw in GOLD_KEYWORDS)
 
 
+# -----------------------------------------------------------
+# چارت طلای جهانی (XAU/USD)
+# -----------------------------------------------------------
+# tgju فقط قیمت لحظه‌ای می‌دهد، نه سری تاریخی، پس برای چارت از اندپوینت
+# عمومی و رایگان یاهو فاینانس (بدون نیاز به کلید) روی نماد فیوچرز طلا
+# (GC=F) استفاده شده است. اگر این سرویس در دسترس نبود، پیام متنی طلا
+# همچنان (بدون چارت) ارسال می‌شود.
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+
+_GOLD_CHART_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+_GOLD_CHART_CACHE_TTL = 60.0  # هر ۶۰ ثانیه یک‌بار رفرش
+
+
+async def _fetch_gold_series(interval: str, range_: str):
+    params = {"interval": interval, "range": range_}
+    data = await _fetch_json(YAHOO_CHART_URL, headers=DEFAULT_HEADERS, params=params)
+    if not data:
+        return None
+    try:
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["quote"][0]["close"]
+        points = [(t, c) for t, c in zip(timestamps, closes) if c is not None]
+        return points if len(points) >= 2 else None
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+async def fetch_world_gold_series():
+    # اول بازه‌ی ۱ روزه با گام ۱۵ دقیقه؛ اگر بازار بسته بود (مثلاً آخر هفته) فال‌بک ۵ روزه
+    points = await _fetch_gold_series("15m", "1d")
+    if not points:
+        points = await _fetch_gold_series("1h", "5d")
+    return points
+
+
+def _render_world_gold_chart_sync(points) -> bytes:
+    times = [datetime.fromtimestamp(t, tz=timezone.utc) for t, _ in points]
+    prices = [p for _, p in points]
+
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor="#000000")
+    ax.set_facecolor("#000000")
+    ax.plot(times, prices, color="#FFD700", linewidth=1.8)
+    ax.fill_between(times, prices, min(prices), color="#FFD700", alpha=0.08)
+
+    ax.set_title("XAU/USD | World Gold Ounce", color="#e6e6e6", fontsize=13, pad=10)
+    ax.set_ylabel("Price (USD)", color="#cfcfcf")
+    ax.tick_params(colors="#9a9a9a")
+    for spine in ax.spines.values():
+        spine.set_color("#555555")
+    ax.grid(True, color="#222222", linestyle="--", linewidth=0.5)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    fig.autofmt_xdate(rotation=0)
+
+    ax.text(
+        0.5, 0.03, "Created by @SuperExFa_bot | @SuperexIR",
+        transform=ax.transAxes, ha="center", va="bottom",
+        fontsize=9, color="#9a9a9a",
+    )
+
+    buf = io.BytesIO()
+    try:
+        fig.tight_layout()
+        fig.savefig(buf, dpi=130, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.15)
+        return buf.getvalue()
+    finally:
+        buf.close()
+        plt.close(fig)
+
+
+async def generate_world_gold_chart() -> Optional[bytes]:
+    now = time.time()
+    if _GOLD_CHART_CACHE["data"] and (now - _GOLD_CHART_CACHE["ts"]) < _GOLD_CHART_CACHE_TTL:
+        return _GOLD_CHART_CACHE["data"]
+
+    points = await fetch_world_gold_series()
+    if not points:
+        return None
+
+    loop = asyncio.get_running_loop()
+    image_bytes = await loop.run_in_executor(_CHART_EXECUTOR, _render_world_gold_chart_sync, points)
+
+    _GOLD_CHART_CACHE["data"] = image_bytes
+    _GOLD_CHART_CACHE["ts"] = now
+    return image_bytes
+
+
 @tools_router.message(is_gold_trigger)
 async def handle_gold_price(message: types.Message):
     data = await fetch_tgju_data()
-    if not data:
+
+    geram18_val: Optional[float] = None
+    ons_val: Optional[float] = None
+
+    if data:
+        current = data.get("current", {})
+        geram18_item = current.get("geram18")
+        ons_item = current.get("ons")
+        geram18_val = _clean_numeric(geram18_item.get("p")) if geram18_item else None
+        ons_val = _clean_numeric(ons_item.get("p")) if ons_item else None
+
+    if geram18_val is None and ons_val is None:
         if message.chat.type == "private":
             await message.reply(
-                "⚠️ در حال حاضر امکان دریافت قیمت طلا و سکه وجود ندارد.",
+                "⚠️ در حال حاضر امکان دریافت قیمت طلا وجود ندارد.",
                 parse_mode="HTML",
             )
         return  # Silent Fail در گروه
 
-    current = data.get("current", {})
-
-    def price_of(key: str) -> Optional[Any]:
-        item = current.get(key)
-        return item.get("p") if item else None
-
-    lines = ["🥇 <b>قیمت لحظه‌ای طلا و سکه</b>\n"]
-    found_any = False
-
-    for key, label in GOLD_ITEMS.items():
-        raw = price_of(key)
-        val = _clean_numeric(raw)
-        if val is None:
-            continue  # آیتم نامعتبر/موجود نبود -> اصلاً نمایش داده نمی‌شود (نه N/A)
-        found_any = True
-        lines.append(f"• {label}: <b>{val / 10:,.0f}</b> تومان")
-
-    ons_raw = price_of("ons")
-    ons_val = _clean_numeric(ons_raw)
+    lines = ["🥇 <b>قیمت طلا</b>\n"]
+    if geram18_val is not None:
+        lines.append(f"• طلای ۱۸ عیار: <b>{geram18_val / 10:,.0f}</b> تومان")
     if ons_val is not None:
-        found_any = True
-        lines.append(f"\n🌍 انس جهانی طلا: <b>{ons_val:,.2f}</b> دلار")
-
-    if not found_any:
-        if message.chat.type == "private":
-            await message.reply(
-                "⚠️ در حال حاضر امکان دریافت قیمت طلا و سکه وجود ندارد.",
-                parse_mode="HTML",
-            )
-        return
-
+        lines.append(f"🌍 انس جهانی طلا: <b>{ons_val:,.2f}</b> دلار")
     lines.append(FOOTER)
-    await message.reply("\n".join(lines), parse_mode="HTML")
+    caption = "\n".join(lines)
+
+    chart_bytes = None
+    try:
+        chart_bytes = await generate_world_gold_chart()
+    except Exception as e:
+        logger.warning(f"[tools] world gold chart failed: {e}")
+
+    if chart_bytes:
+        photo = BufferedInputFile(chart_bytes, filename="world_gold_chart.png")
+        await message.reply_photo(photo=photo, caption=caption, parse_mode="HTML")
+    else:
+        await message.reply(caption, parse_mode="HTML")
 
 
 # ===========================================================
