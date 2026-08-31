@@ -71,28 +71,52 @@ async def _fetch_json(
     return None
 
 
+# tgju (و بعضی سرویس‌های دیگر) اعداد را به‌صورت رشته و با جداکننده هزارگان
+# برمی‌گردانند (مثلاً "3,780,000") و گاهی با ارقام فارسی/عربی. float() مستقیم
+# روی چنین رشته‌ای Exception می‌دهد - همین باعث می‌شد همه‌ی مقادیر N/A شوند.
+# این تابع قبل از تبدیل، رشته را پاک‌سازی می‌کند.
+_DIGIT_TRANS = str.maketrans(
+    "۰۱۲۳۴۵۶۷۸۹" + "٠١٢٣٤٥٦٧٨٩",
+    "01234567890123456789",
+)
+
+
+def _clean_numeric(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip().translate(_DIGIT_TRANS)
+    text = re.sub(r"[^\d.\-]", "", text)
+    if not text or text in ("-", "."):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def rial_to_toman_str(rial_value: Any) -> str:
     """تبدیل ریال به تومان + جداکننده سه رقمی."""
-    try:
-        toman = float(rial_value) / 10
-        return f"{toman:,.0f}"
-    except (TypeError, ValueError):
+    val = _clean_numeric(rial_value)
+    if val is None:
         return "N/A"
+    return f"{val / 10:,.0f}"
 
 
 def toman_str(toman_value: Any) -> str:
     """فرمت مقدار تومانی (بدون تبدیل) + جداکننده سه رقمی."""
-    try:
-        return f"{float(toman_value):,.0f}"
-    except (TypeError, ValueError):
+    val = _clean_numeric(toman_value)
+    if val is None:
         return "N/A"
+    return f"{val:,.0f}"
 
 
 def format_number(value: Any, decimals: int = 2) -> str:
-    try:
-        return f"{float(value):,.{decimals}f}"
-    except (TypeError, ValueError):
+    val = _clean_numeric(value)
+    if val is None:
         return "N/A"
+    return f"{val:,.{decimals}f}"
 
 
 FOOTER = "\n<i>@SuperExFa_bot</i>"
@@ -175,15 +199,17 @@ async def handle_gold_price(message: types.Message):
 
     for key, label in GOLD_ITEMS.items():
         raw = price_of(key)
-        if raw is None:
-            continue
+        val = _clean_numeric(raw)
+        if val is None:
+            continue  # آیتم نامعتبر/موجود نبود -> اصلاً نمایش داده نمی‌شود (نه N/A)
         found_any = True
-        lines.append(f"• {label}: <b>{rial_to_toman_str(raw)}</b> تومان")
+        lines.append(f"• {label}: <b>{val / 10:,.0f}</b> تومان")
 
     ons_raw = price_of("ons")
-    if ons_raw is not None:
+    ons_val = _clean_numeric(ons_raw)
+    if ons_val is not None:
         found_any = True
-        lines.append(f"\n🌍 انس جهانی طلا: <b>{format_number(ons_raw)}</b> دلار")
+        lines.append(f"\n🌍 انس جهانی طلا: <b>{ons_val:,.2f}</b> دلار")
 
     if not found_any:
         if message.chat.type == "private":
@@ -210,25 +236,15 @@ async def fetch_tgju_dollar_toman() -> Optional[float]:
     item = data.get("current", {}).get("price_dollar_rl")
     if not item:
         return None
-    try:
-        return float(item.get("p")) / 10  # ریال -> تومان
-    except (TypeError, ValueError):
+    val = _clean_numeric(item.get("p"))
+    if val is None:
         return None
+    return val / 10  # ریال -> تومان
 
 
-async def fetch_nobitex_usdt() -> Optional[dict]:
-    url = "https://api.nobitex.ir/market/stats"
-    params = {"srcCurrency": "usdt", "dstCurrency": "rls"}
-    data = await _fetch_json(url, params=params)
-    if not data:
-        return None
-    try:
-        stats = data.get("stats", {}).get("usdt-rls", {})
-        latest_rial = float(stats.get("latest"))
-        day_change = stats.get("dayChange")
-        return {"price_toman": latest_rial / 10, "change": day_change}
-    except (TypeError, ValueError, AttributeError):
-        return None
+# نوبیتکس عمداً حذف شده: سرور Render قادر به resolve کردن دامنه‌ی
+# api.nobitex.ir نیست ("Name or service not known" در لاگ‌ها) و همیشه fail
+# می‌شد، پس دیگر در هیچ‌جای این فایل استفاده نمی‌شود.
 
 
 async def fetch_bitpin_usdt() -> Optional[dict]:
@@ -268,21 +284,11 @@ async def fetch_wallex_usdt() -> Optional[dict]:
 
 
 def _format_change(change: Any) -> str:
-    if change is None:
+    val = _clean_numeric(change)
+    if val is None:
         return ""
-    try:
-        change_val = float(change)
-    except (TypeError, ValueError):
-        return ""
-    arrow = "🔺" if change_val > 0 else ("🔻" if change_val < 0 else "▪️")
-    return f" ({arrow}{abs(change_val):.2f}%)"
-
-
-def _format_exchange_line(name: str, info: Optional[dict]) -> str:
-    if not info:
-        return f"• {name}: <i>نامشخص</i>"
-    price_str = toman_str(info["price_toman"])
-    return f"• {name}: <b>{price_str}</b> تومان{_format_change(info.get('change'))}"
+    arrow = "🔺" if val > 0 else ("🔻" if val < 0 else "▪️")
+    return f" ({arrow}{abs(val):.2f}%)"
 
 
 def is_dollar_trigger(message: types.Message) -> bool:
@@ -295,14 +301,16 @@ def is_dollar_trigger(message: types.Message) -> bool:
 
 @tools_router.message(is_dollar_trigger)
 async def handle_dollar_price(message: types.Message):
-    tgju_dollar, nobitex, bitpin, wallex = await asyncio.gather(
+    # نوبیتکس حذف شده (به دلیل عدم دسترسی سرور Render)؛ فقط بیت‌پین و والکس
+    tgju_dollar, bitpin, wallex = await asyncio.gather(
         fetch_tgju_dollar_toman(),
-        fetch_nobitex_usdt(),
         fetch_bitpin_usdt(),
         fetch_wallex_usdt(),
     )
 
-    if not any([tgju_dollar, nobitex, bitpin, wallex]):
+    sources = [s for s in (bitpin, wallex) if s and _clean_numeric(s.get("price_toman")) is not None]
+
+    if tgju_dollar is None and not sources:
         if message.chat.type == "private":
             await message.reply(
                 "⚠️ در حال حاضر امکان دریافت نرخ دلار و تتر وجود ندارد.",
@@ -313,11 +321,19 @@ async def handle_dollar_price(message: types.Message):
     lines = ["💵 <b>نرخ لحظه‌ای دلار و تتر</b>\n"]
 
     if tgju_dollar is not None:
-        lines.append(f"🏦 دلار بازار آزاد تهران: <b>{toman_str(tgju_dollar)}</b> تومان\n")
+        lines.append(f"🏦 دلار بازار آزاد: <b>{toman_str(tgju_dollar)}</b> تومان\n")
 
-    lines.append(_format_exchange_line("نوبیتکس (USDT)", nobitex))
-    lines.append(_format_exchange_line("بیت‌پین (USDT)", bitpin))
-    lines.append(_format_exchange_line("والکس (USDT)", wallex))
+    if sources:
+        avg_price = sum(_clean_numeric(s["price_toman"]) for s in sources) / len(sources)
+        changes = [_clean_numeric(s.get("change")) for s in sources]
+        changes = [c for c in changes if c is not None]
+        avg_change_str = ""
+        if changes:
+            avg_change = sum(changes) / len(changes)
+            avg_change_str = _format_change(avg_change)
+        lines.append(f"💰 میانگین قیمت تتر: <b>{toman_str(avg_price)}</b> تومان{avg_change_str}")
+    else:
+        lines.append("💰 میانگین قیمت تتر: <i>در دسترس نیست</i>")
 
     lines.append(FOOTER)
     await message.reply("\n".join(lines), parse_mode="HTML")
@@ -370,10 +386,13 @@ async def fetch_superex_usdt_price(symbol: str) -> Optional[float]:
 
 
 async def get_avg_usdt_toman_rate() -> Optional[float]:
-    nobitex, bitpin, wallex = await asyncio.gather(
-        fetch_nobitex_usdt(), fetch_bitpin_usdt(), fetch_wallex_usdt()
-    )
-    rates = [r["price_toman"] for r in (nobitex, bitpin, wallex) if r and r.get("price_toman")]
+    # نوبیتکس حذف شده (به دلیل عدم دسترسی سرور Render)؛ فقط بیت‌پین و والکس
+    bitpin, wallex = await asyncio.gather(fetch_bitpin_usdt(), fetch_wallex_usdt())
+    rates = [
+        _clean_numeric(r["price_toman"])
+        for r in (bitpin, wallex)
+        if r and _clean_numeric(r.get("price_toman")) is not None
+    ]
     if not rates:
         return None
     return sum(rates) / len(rates)
