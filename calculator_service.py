@@ -1,19 +1,17 @@
 import re
 import aiohttp
-import logging
-from aiogram import Router, types
+from aiogram import Router, F, types
 from dollar_service import get_best_tether_price_toman
 
 calculator_router = Router()
 
-# الگوی هوشمند برای تشخیص ورودی‌هایی مثل "1.5 btc" یا "500 trx"
-CALC_REGEX = re.compile(r"^(\d+(?:\.\d+)?)\s*([a-zA-Z]{2,10})$", re.IGNORECASE)
+# الگوی دقیق: عدد + حروف انگلیسی نماد ارز (با فاصله یا بدون فاصله)
+CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]{2,10})\s*$", re.IGNORECASE)
 
 async def fetch_crypto_price_usd(symbol: str) -> float:
-    """دریافت قیمت دلاری ارز از بایننس یا صرافی SuperEx"""
     base = symbol.upper()
     
-    # ۱. استعلام از بایننس
+    # ۱. بایننس
     url_binance = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={base}USDT"
     try:
         async with aiohttp.ClientSession() as session:
@@ -24,7 +22,7 @@ async def fetch_crypto_price_usd(symbol: str) -> float:
     except Exception:
         pass
 
-    # ۲. استعلام پشتیبان از SuperEx
+    # ۲. فال‌بک صرافی SuperEx
     url_superex = f"https://api.superexchang.com/resource/v3/public/currency/new?currency={base.lower()}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -39,34 +37,24 @@ async def fetch_crypto_price_usd(symbol: str) -> float:
 
     return 0.0
 
-@calculator_router.message()
+@calculator_router.message(F.text.regexp(CALC_REGEX))
 async def handle_calculator_queries(message: types.Message):
-    if not message.text:
-        return
-
-    text = message.text.strip()
-    match = CALC_REGEX.match(text)
-    
+    match = CALC_REGEX.match(message.text.strip())
     if not match:
-        return  # اگر الگوی عدد + نام ارز نبود، اجازه می‌دهد سایر هندلرها اجرا شوند
+        return
 
     amount = float(match.group(1))
     symbol = match.group(2).upper()
 
-    # استعلام قیمت دلاری و نرخ تتر به تومان به صورت موازی
-    crypto_price_task = fetch_crypto_price_usd(symbol)
-    tether_rate_task = get_best_tether_price_toman()
-
-    crypto_price = await crypto_price_task
-    tether_rate = await tether_rate_task
+    crypto_price = await fetch_crypto_price_usd(symbol)
+    tether_rate = await get_best_tether_price_toman()
 
     if crypto_price <= 0:
-        return  # اگر ارزی پیدا نشد، پیام خطا نمی‌دهد تا ربات مزاحم چت‌های عادی نشود
+        return
 
     total_usd = amount * crypto_price
     total_toman = total_usd * tether_rate
 
-    # فرمت‌دهی خروجی
     msg = (
         f"🧮 **محاسبه‌گر ارزش ارز دیجیتال**\n"
         f"━━━━━━━━━━━━━━━━━━\n"
