@@ -5,9 +5,11 @@ from aiogram import Router, F, types
 dollar_router = Router()
 
 async def fetch_free_market_dollar() -> dict:
-    """دریافت قیمت دلار بازار آزاد تهران از TGJU"""
     url = "https://call1.tgju.org/ajax.json"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.tgju.org/"
+    }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=4.0) as resp:
@@ -28,7 +30,6 @@ async def fetch_free_market_dollar() -> dict:
     return {}
 
 async def fetch_nobitex_tether() -> dict:
-    """دریافت قیمت تتر از نوبیتکس"""
     url = "https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls"
     try:
         async with aiohttp.ClientSession() as session:
@@ -50,7 +51,6 @@ async def fetch_nobitex_tether() -> dict:
     return {}
 
 async def fetch_bitpin_tether() -> dict:
-    """دریافت قیمت تتر از بیت‌پین"""
     url = "https://api.bitpin.ir/v1/mkt/markets/"
     try:
         async with aiohttp.ClientSession() as session:
@@ -61,7 +61,6 @@ async def fetch_bitpin_tether() -> dict:
                     for m in results:
                         if m.get("code") == "USDT_IRT":
                             price = int(float(m.get("price", 0)))
-                            # در بیت‌پین قیمت تومان است
                             return {
                                 "source": "بیت‌پین (Bitpin)",
                                 "toman": price,
@@ -73,7 +72,6 @@ async def fetch_bitpin_tether() -> dict:
     return {}
 
 async def fetch_wallex_tether() -> dict:
-    """دریافت قیمت تتر از والکس"""
     url = "https://api.wallex.ir/v1/markets"
     try:
         async with aiohttp.ClientSession() as session:
@@ -95,7 +93,6 @@ async def fetch_wallex_tether() -> dict:
     return {}
 
 async def get_best_tether_price_toman() -> float:
-    """یک متد کمکی برای استفاده در ماشین‌حساب: بازگرداندن میانگین/بهترین نرخ تتر به تومان"""
     prices = []
     for fetcher in [fetch_nobitex_tether, fetch_bitpin_tether, fetch_wallex_tether, fetch_free_market_dollar]:
         res = await fetcher()
@@ -103,10 +100,9 @@ async def get_best_tether_price_toman() -> float:
             prices.append(res["toman"])
     if prices:
         return sum(prices) / len(prices)
-    return 60000.0  # مقدار پشتیبان اضطراری
+    return 60000.0
 
 def format_dollar_message(free_usd: dict, exchanges: list) -> str:
-    """تولید پیام شکیل نرخ دلار و تتر"""
     msg = "💵 **قیمت لحظه‌ای دلار و تتر (USDT)**\n"
     msg += "━━━━━━━━━━━━━━━━━━\n\n"
 
@@ -124,11 +120,10 @@ def format_dollar_message(free_usd: dict, exchanges: list) -> str:
     msg += "🤖 @SuperExFa_bot | @SuperexIR"
     return msg
 
-@dollar_router.message(F.text.lower().in_(["دلار", "تتر", "usdt", "dollar", "قیمت دلار", "قیمت تتر", "نرخ دلار"]))
+@dollar_router.message(F.text.func(lambda text: text and text.strip().lower() in ["دلار", "تتر", "usdt", "dollar", "قیمت دلار", "قیمت تتر", "نرخ دلار"]))
 async def handle_dollar_query(message: types.Message):
     wait_msg = await message.reply("⏳ در حال استعلام نرخ دلار و تتر...")
     
-    # اجرای موازی استعلام‌ها
     import asyncio
     free_usd_task = asyncio.create_task(fetch_free_market_dollar())
     nobitex_task = asyncio.create_task(fetch_nobitex_tether())
