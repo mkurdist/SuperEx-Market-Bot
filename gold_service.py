@@ -5,7 +5,6 @@ from aiogram import Router, F, types
 gold_router = Router()
 
 def clean_number(val) -> int:
-    """تبدیل رشته‌های عددی دارای کاما به عدد صحیح ریال"""
     if not val:
         return 0
     clean_str = str(val).replace(",", "").strip()
@@ -15,12 +14,10 @@ def clean_number(val) -> int:
         return 0
 
 def rial_to_toman_str(rial_val: int) -> str:
-    """تبدیل ریال به تومان با جداکننده سه رقمی"""
     toman = rial_val // 10
     return f"{toman:,}"
 
 async def fetch_gold_and_coin_prices() -> dict:
-    """دریافت قیمت لحظه‌ای طلا و سکه از سرورهای داده زنده TGJU"""
     urls = [
         "https://call1.tgju.org/ajax.json",
         "https://call.tgju.org/ajax.json",
@@ -28,8 +25,9 @@ async def fetch_gold_and_coin_prices() -> dict:
     ]
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json, text/javascript, */*; q=0.01"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": "https://www.tgju.org/"
     }
 
     async with aiohttp.ClientSession() as session:
@@ -48,7 +46,6 @@ async def fetch_gold_and_coin_prices() -> dict:
     return {}
 
 def parse_tgju_gold(current: dict) -> dict:
-    """استخراج و قالب‌بندی اقلام مختلف طلا و سکه"""
     items = {
         "geram18": "طلای ۱۸ عیار",
         "geram24": "طلای ۲۴ عیار",
@@ -80,20 +77,17 @@ def parse_tgju_gold(current: dict) -> dict:
                 "price": price_display,
                 "change": dp,
                 "high": rial_to_toman_str(h_rial) if key != "ons" else str(h_rial),
-                "low": rial_to_toman_str(l_rial) if key != "ons" else str(l_rial),
-                "time": row.get("t", "")
+                "low": rial_to_toman_str(l_rial) if key != "ons" else str(l_rial)
             }
     return parsed
 
 def format_gold_message(data: dict) -> str:
-    """تولید متن زیبا و جذاب برای تلگرام"""
     if not data:
-        return "❌ در حال حاضر دریافت نرخ طلا و سکه با مشکل مواجه شد. لطفاً کمی بعد تلاش کنید."
+        return "❌ در حال حاضر دریافت نرخ طلا و سکه با مشکل مواجه شد. لطفاً لحظاتی بعد تلاش کنید."
 
     msg = "🏆 **نرخ لحظه‌ای طلا، سکه و آبشده**\n"
     msg += "━━━━━━━━━━━━━━━━━━\n\n"
     
-    # طلا و آبشده
     msg += "🪙 **بخش طلا و آبشده:**\n"
     for k in ["geram18", "mesghal", "geram24", "ons"]:
         if k in data:
@@ -112,8 +106,7 @@ def format_gold_message(data: dict) -> str:
     msg += "🤖 @SuperExFa_bot | @SuperexIR"
     return msg
 
-# هندلر پاسخ به پیام‌های کاربران
-@gold_router.message(F.text.lower().in_(["طلا", "سکه", "قیمت طلا", "قیمت سکه", "gold", "مظنه", "ابشده", "آبشده"]))
+@gold_router.message(F.text.func(lambda text: text and text.strip().lower() in ["طلا", "سکه", "قیمت طلا", "قیمت سکه", "gold", "مظنه", "ابشده", "آبشده"]))
 async def handle_gold_query(message: types.Message):
     wait_msg = await message.reply("⏳ در حال دریافت آخرین نرخ طلا و سکه...")
     data = await fetch_gold_and_coin_prices()
