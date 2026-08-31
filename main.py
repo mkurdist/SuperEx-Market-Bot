@@ -19,6 +19,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedIn
 from aiogram.filters.callback_data import CallbackData
 from dotenv import load_dotenv
 
+# ایمپورت کردن ماژول‌های اختصاصی جدید
+from gold_service import gold_router
+from dollar_service import dollar_router
+from calculator_service import calculator_router
+
 # ---------------------------------------------------------
 # Configuration & Setup
 # ---------------------------------------------------------
@@ -30,6 +35,11 @@ logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# اتصال روترهای ماژولار جدید به ربات
+dp.include_router(gold_router)
+dp.include_router(dollar_router)
+dp.include_router(calculator_router)
 
 TIMEFRAME_MAP = {
     "1m": "1m",
@@ -114,9 +124,6 @@ class ChartCallback(CallbackData, prefix="chart"):
 # API Helper Functions
 # ---------------------------------------------------------
 def get_superex_headers() -> dict:
-    """
-    Generates dynamic security headers required by SuperEx API.
-    """
     return {
         "accept": "*/*",
         "accept-language": "en",
@@ -142,10 +149,8 @@ async def fetch_price_data(symbol: str) -> dict:
                         price = float(data_obj.get("newPrice", "0.0"))
                         sum_number = float(data_obj.get("sumNumber", "0.0"))
                         
-                        # ضرب حجم توکنی در قیمت لحظه‌ای برای به دست آوردن حجم دلاری (USDT)
                         volume_usdt = price * sum_number
                         
-                        # فرمت‌دهی عدد برای نمایش زیباتر (مثلا جداکننده هزارگان یا اعشار مناسب)
                         if volume_usdt >= 1000:
                             formatted_vol = f"{volume_usdt:,.2f}"
                         else:
@@ -157,7 +162,7 @@ async def fetch_price_data(symbol: str) -> dict:
                             "change_24h": str(data_obj.get("change", "0.0")),
                             "high": str(data_obj.get("maxPrice", "0.0")),
                             "low": str(data_obj.get("minPrice", "0.0")),
-                            "volume": formatted_vol,  # حالا این مقدار حجم دلاری است
+                            "volume": formatted_vol,
                             "source": "SuperEx"
                         }
         except Exception as e:
@@ -167,9 +172,6 @@ async def fetch_price_data(symbol: str) -> dict:
     return {"error": "Symbol not found on SuperEx."}
 
 async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
-    """
-    Fetches real candlestick data from Binance public API (using vision endpoint to avoid 451 errors).
-    """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     binance_symbol = f"{base_symbol.upper()}USDT"
     
@@ -199,11 +201,7 @@ async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
     return parsed_data
 
 async def fetch_coingecko_market_chart(symbol: str) -> list:
-    """
-    Fallback function: Fetches historical chart data from CoinGecko if Binance fails or symbol is missing.
-    """
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
-    
     search_url = f"https://api.coingecko.com/api/v3/search?query={base_symbol}"
     
     parsed_data = []
@@ -239,25 +237,15 @@ async def fetch_coingecko_market_chart(symbol: str) -> list:
     return parsed_data
 
 async def fetch_kline_with_fallback(symbol: str, timeframe: str) -> list:
-    """
-    Tries Binance first. If it fails or returns no data, falls back to CoinGecko.
-    """
     data = await fetch_binance_kline(symbol, timeframe)
     if data:
         return data
         
-    logging.info(f"Binance failed or no data for {symbol}, falling back to CoinGecko...")
-    
+    logging.info(f"Binance failed for {symbol}, falling back to CoinGecko...")
     data = await fetch_coingecko_market_chart(symbol)
     return data
 
-# ---------------------------------------------------------
-# Cached wrappers around the exchange query methods
-# ---------------------------------------------------------
 async def get_price_data_cached(symbol: str) -> dict:
-    """
-    Returns cached price data if available within TTL.
-    """
     cache_key = symbol.upper()
     cached = _cache_get(PRICE_CACHE, cache_key, PRICE_CACHE_TTL)
     if cached is not None:
@@ -268,13 +256,7 @@ async def get_price_data_cached(symbol: str) -> dict:
         _cache_set(PRICE_CACHE, cache_key, data)
     return data
 
-# ---------------------------------------------------------
-# Chart Generation
-# ---------------------------------------------------------
 def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
-    """
-    Renders the candlestick chart with tight bounding and zero outer margins.
-    """
     if timeframe == "1d":
         date_format = '%b'
         x_rotation = 0
@@ -297,11 +279,8 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     )
 
     ax = axlist[0]
-    
-    # تنظیم فاصله عنوان تا دقیقاً بالای کادر قرار گیرد
     ax.set_title(ax.get_title(), pad=10, fontsize=13, color='#e6e6e6')
 
-    # اضافه کردن واترمارک دقیقاً داخل لبه پایینی کادر نمودار
     watermark_text = "Created by @SuperExFa_bot | @SuperexIR"
     ax.text(
         0.5, 0.03, watermark_text,
@@ -311,7 +290,6 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
     buf = io.BytesIO()
     try:
-        # استفاده از bbox_inches='tight' برای حذف کامل حاشیه‌های سیاه اضافی دور تصویر
         fig.savefig(
             buf, dpi=130,
             bbox_inches='tight', pad_inches=0.1,
@@ -323,9 +301,6 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
         plt.close(fig)
 
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
-    """
-    Generates a professional candlestick chart using Binance with CoinGecko fallback.
-    """
     cache_key = (symbol.upper(), timeframe)
     cached = _cache_get(CHART_CACHE, cache_key, CHART_CACHE_TTL)
     if cached is not None:
@@ -350,10 +325,8 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     return image_bytes
 
 def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
-    """Generates the inline keyboard for timeframes and links."""
     url_register = "https://app.superex.live/register?invitationCode=VQK2N6DDS"
     url_group = "https://t.me/SuperexIR"
-    
     base_symbol = symbol.upper().replace("_USDT", "").replace("USDT", "")
     
     keyboard = [
@@ -377,9 +350,6 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
 
 @dp.message(F.text == "/test_emojis")
 async def show_all_emojis(message: types.Message):
-    """
-    Temporary command to render custom emojis and find their IDs.
-    """
     unknown_ids = [
         "5321041614443944130", "5319019251783212762", "5204021979174157518",
         "5204367105566193797", "5203973501878286332", "5203921507004201718",
@@ -391,21 +361,14 @@ async def show_all_emojis(message: types.Message):
     ]
     
     text = "🔍 **لیست تشخیص ایموجی‌ها:**\n\n"
-    
     for i, eid in enumerate(unknown_ids, 1):
         text += f"{i}. <tg-emoji emoji-id='{eid}'>🪙</tg-emoji> ➔ <code>{eid}</code>\n"
-        
     await message.reply(text, parse_mode="HTML")
-
 
 @dp.message(F.entities | F.caption_entities)
 async def extract_custom_emoji(message: types.Message):
-    """
-    Utility handler to extract custom emoji IDs from incoming messages.
-    """
     entities = message.caption_entities if message.photo or message.document else message.entities
     full_text = message.caption if message.photo or message.document else message.text
-    
     found_emojis = []
     
     if entities and full_text:
@@ -413,7 +376,6 @@ async def extract_custom_emoji(message: types.Message):
             if entity.type == "custom_emoji":
                 emoji_char = full_text[entity.offset : entity.offset + entity.length]
                 entry = f"ایموجی: {emoji_char} ➔ آیدی: `{entity.custom_emoji_id}`"
-                
                 if entry not in found_emojis:
                     found_emojis.append(entry)
             
@@ -428,9 +390,6 @@ async def extract_custom_emoji(message: types.Message):
 
 @dp.message(F.text)
 async def handle_ticker_input(message: types.Message):
-    """
-    Listens to any text message and processes short alphanumeric text as a crypto ticker.
-    """
     text = message.text.strip().upper()
     
     if not text.isalnum() or len(text) > 10:
@@ -476,9 +435,6 @@ async def handle_ticker_input(message: types.Message):
 
 @dp.callback_query(ChartCallback.filter())
 async def process_chart_timeframe(query: types.CallbackQuery, callback_data: ChartCallback):
-    """
-    Handles inline button clicks to update chart timeframes.
-    """
     symbol = callback_data.symbol
     timeframe = callback_data.timeframe
     
@@ -504,11 +460,9 @@ async def process_chart_timeframe(query: types.CallbackQuery, callback_data: Cha
 # Web Server Setup (For Render)
 # ---------------------------------------------------------
 async def health_check(request):
-    """HTTP endpoint to keep the bot alive on Render."""
     return web.Response(text="SuperEx Bot is Running smoothly!")
 
 async def main():
-    """Starts the web server and the bot polling."""
     app = web.Application()
     app.router.add_get('/', health_check)
     
