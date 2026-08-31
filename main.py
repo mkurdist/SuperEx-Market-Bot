@@ -5,11 +5,12 @@ import time
 import uuid
 import json
 import logging
+import re
 import aiohttp
 import pandas as pd
 import mplfinance as mpf
 import matplotlib
-matplotlib.use('Agg') # Prevents GUI crashes on headless servers like Render
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,7 +20,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedIn
 from aiogram.filters.callback_data import CallbackData
 from dotenv import load_dotenv
 
-# ایمپورت کردن ماژول‌های اختصاصی جدید
+# ایمپورت روترهای ماژولار جدید
 from gold_service import gold_router
 from dollar_service import dollar_router
 from calculator_service import calculator_router
@@ -36,7 +37,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# اتصال روترهای ماژولار جدید به ربات
+# اولویت ثبت روترها
 dp.include_router(gold_router)
 dp.include_router(dollar_router)
 dp.include_router(calculator_router)
@@ -116,7 +117,6 @@ CHART_STYLE = mpf.make_mpf_style(
 # Callback Data Factories
 # ---------------------------------------------------------
 class ChartCallback(CallbackData, prefix="chart"):
-    """Callback factory for chart timeframe buttons."""
     symbol: str
     timeframe: str
 
@@ -384,18 +384,15 @@ async def extract_custom_emoji(message: types.Message):
         await message.reply(response_text, parse_mode="Markdown")
         return
         
-    text = message.text.strip().upper() if message.text else ""
-    if text.isalnum() and len(text) <= 10:
+    text = message.text.strip() if message.text else ""
+    # فقط حروف انگلیسی لاتین برای کریپتو
+    if re.match(r"^[a-zA-Z]{2,10}$", text):
         await handle_ticker_input(message)
 
-@dp.message(F.text)
+# فیلتر هوشمند: فقط حروف انگلیسی مجاز هستند (مثلاً BTC، ETH)
+@dp.message(F.text.regexp(r"^[a-zA-Z]{2,10}$"))
 async def handle_ticker_input(message: types.Message):
-    text = message.text.strip().upper()
-    
-    if not text.isalnum() or len(text) > 10:
-        return
-        
-    symbol = text
+    symbol = message.text.strip().upper()
     processing_msg = await message.reply("⏳ Fetching data...")
 
     price_task = asyncio.create_task(get_price_data_cached(symbol))
