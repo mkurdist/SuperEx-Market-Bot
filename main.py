@@ -20,10 +20,12 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedIn
 from aiogram.filters.callback_data import CallbackData
 from dotenv import load_dotenv
 
-# ایمپورت روترهای ماژولار جدید
-from gold_service import gold_router
-from dollar_service import dollar_router
-from calculator_service import calculator_router
+# ---------------------------------------------------------
+# ماژول ایزوله ۳ قابلیت جدید (طلا/سکه، دلار/تتر، ماشین‌حساب کریپتو)
+# تمام منطق این ۳ قابلیت داخل tools.py است و از طریق یک روتر واحد
+# (tools_router) به دیسپچر متصل می‌شود - بدون هیچ دخالتی در بخش‌های زیر.
+# ---------------------------------------------------------
+from tools import tools_router
 
 # ---------------------------------------------------------
 # Configuration & Setup
@@ -36,11 +38,6 @@ logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-# اولویت ثبت روترها
-dp.include_router(gold_router)
-dp.include_router(dollar_router)
-dp.include_router(calculator_router)
 
 TIMEFRAME_MAP = {
     "1m": "1m",
@@ -345,6 +342,53 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ---------------------------------------------------------
+# تشخیص هوشمند نماد کریپتو (Ticker Detection) - بازنویسی‌شده
+# ---------------------------------------------------------
+# چرا این تابع لازم است؟
+# ربات در گروه‌های شلوغ حضور دارد و هندلر تیکر قبلی صرفاً با یک ریجکس
+# ساده (۲ تا ۱۰ حرف انگلیسی) هر پیامی مثل "hi"، "ok"، "buy"، "admin" و
+# همچنین کلیدواژه‌های قابلیت‌های جدید مثل "gold"، "dollar"، "usdt" را هم
+# به‌عنوان نماد کریپتو تفسیر می‌کرد. این هم باعث اسپم پیام خطا در گروه
+# می‌شد و هم باعث تداخل با قابلیت‌های جدید طلا/دلار در tools.py می‌شد
+# (چون هندلرهای خود dp زودتر از روترهای include شده بررسی می‌شوند).
+#
+# راه‌حل: یک Blocklist از کلمات پرکاربرد انگلیسی + کلیدواژه‌های
+# اختصاصی قابلیت‌های جدید، به همراه یک تابع اعتبارسنجی مرکزی.
+COMMON_WORDS_BLOCKLIST = {
+    # کلمات محاوره‌ای/عمومی رایج در گروه‌ها
+    "hi", "hello", "hey", "yo", "sup", "ok", "okay", "yes", "no", "yep", "nope",
+    "bye", "please", "thanks", "thank", "welcome", "sorry", "lol", "lmao", "wow",
+    "nice", "cool", "good", "bad", "great", "ok?", "test", "help", "info", "menu",
+    # کلمات مرتبط با نقش/مدیریت گروه
+    "admin", "admins", "mod", "mods", "owner", "dev", "team", "support", "staff",
+    "report", "spam", "ban", "kick", "mute", "bot", "bots",
+    # کلمات معاملاتی عمومی (که خودشان نماد نیستند)
+    "buy", "sell", "sold", "pump", "dump", "moon", "scam", "fake", "real", "up", "down",
+    "long", "short", "hold", "hodl", "new", "old", "price", "chart", "link", "join",
+    "group", "channel", "start", "stop",
+    # کلیدواژه‌های اختصاصی قابلیت‌های جدید (طلا/دلار) که در tools.py مدیریت می‌شوند
+    "gold", "dollar", "usdt", "tether",
+}
+
+
+def is_valid_ticker_symbol(text: str) -> bool:
+    """
+    بررسی می‌کند که آیا متن ورودی یک نماد کریپتوی معتبر و بی‌خطر برای
+    استعلام از SuperEx است یا نه. متن باید:
+      - فقط شامل حروف انگلیسی (۲ تا ۱۰ کاراکتر) باشد (فارسی هرگز match نمی‌شود)
+      - داخل لیست سیاه کلمات رایج/کلیدواژه‌های اختصاصی نباشد
+    """
+    if not text:
+        return False
+    cleaned = text.strip()
+    if not re.match(r"^[a-zA-Z]{2,10}$", cleaned):
+        return False
+    if cleaned.lower() in COMMON_WORDS_BLOCKLIST:
+        return False
+    return True
+
+
+# ---------------------------------------------------------
 # Message Handlers
 # ---------------------------------------------------------
 
@@ -385,12 +429,12 @@ async def extract_custom_emoji(message: types.Message):
         return
         
     text = message.text.strip() if message.text else ""
-    # فقط حروف انگلیسی لاتین برای کریپتو
-    if re.match(r"^[a-zA-Z]{2,10}$", text):
+    # فقط نمادهای معتبر کریپتو (بدون تداخل با کلمات رایج/کلیدواژه‌های طلا و دلار)
+    if is_valid_ticker_symbol(text):
         await handle_ticker_input(message)
 
-# فیلتر هوشمند: فقط حروف انگلیسی مجاز هستند (مثلاً BTC، ETH)
-@dp.message(F.text.regexp(r"^[a-zA-Z]{2,10}$"))
+# فیلتر هوشمند: فقط نمادهای کریپتوی معتبر (مثلاً BTC، ETH) - نه کلمات رایج، نه کلیدواژه‌های تولز
+@dp.message(lambda message: is_valid_ticker_symbol(message.text or ""))
 async def handle_ticker_input(message: types.Message):
     symbol = message.text.strip().upper()
     processing_msg = await message.reply("⏳ Fetching data...")
@@ -402,7 +446,14 @@ async def handle_ticker_input(message: types.Message):
 
     if "error" in data:
         chart_task.cancel()
-        await processing_msg.edit_text("❌ Symbol not found on SuperEx.")
+        # Silent Fail در گروه‌های شلوغ - فقط در چت خصوصی خطا نمایش داده می‌شود
+        if message.chat.type == "private":
+            await processing_msg.edit_text("❌ Symbol not found on SuperEx.")
+        else:
+            try:
+                await processing_msg.delete()
+            except Exception:
+                pass
         return
 
     caption = (
@@ -452,6 +503,17 @@ async def process_chart_timeframe(query: types.CallbackQuery, callback_data: Cha
     except Exception as e:
         logging.error(f"Error updating chart: {e}")
         await query.answer("Failed to update chart.", show_alert=True)
+
+# ---------------------------------------------------------
+# اتصال روتر ۳ قابلیت جدید (طلا/سکه، دلار/تتر، ماشین‌حساب کریپتو)
+# ---------------------------------------------------------
+# نکته: هندلرهای بالا مستقیماً روی dp ثبت شده‌اند و طبق رفتار aiogram
+# زودتر از روترهای include شده بررسی می‌شوند. به همین دلیل Blocklist
+# بالا (COMMON_WORDS_BLOCKLIST) تضمین می‌کند که پیام‌های حاوی
+# "gold"/"dollar"/"usdt" هرگز توسط handle_ticker_input مصرف نشوند و
+# سالم به tools_router برسند. برای متون فارسی (طلا، سکه، دلار، تتر)
+# اصلاً تداخلی وجود ندارد چون ریجکس تیکر فقط حروف لاتین را می‌پذیرد.
+dp.include_router(tools_router)
 
 # ---------------------------------------------------------
 # Web Server Setup (For Render)
