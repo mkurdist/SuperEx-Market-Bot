@@ -265,6 +265,66 @@ async def generate_world_gold_chart() -> Optional[bytes]:
     return image_bytes
 
 
+# -----------------------------------------------------------
+# ماشین‌حساب طلا (وزن به گرم -> قیمت تومانی)
+# -----------------------------------------------------------
+# نمونه ورودی‌های معتبر: "10 گرم طلا"، "1.5 گرم طلا"
+# مبنای محاسبه: قیمت هر گرم طلای ۱۸ عیار (geram18) که خودِ tgju همین‌طوری
+# می‌دهد (قیمت به‌ازای هر گرم)، پس فقط کافیست در وزن ضرب شود.
+#
+# نکته‌ی مهم درباره‌ی ترتیب: چون این پیام‌ها خودشان شامل کلمه‌ی "طلا"
+# هستند، اگر این هندلر بعد از هندلر عمومی طلا (handle_gold_price) ثبت
+# می‌شد، هیچ‌وقت اجرا نمی‌شد (چون is_gold_trigger هم با آن‌ها match
+# می‌کند و روتر با اولین match متوقف می‌شود). به همین دلیل این هندلر
+# زودتر از هندلر عمومی طلا در فایل ثبت شده است.
+GOLD_GRAM_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*گرم\s*طلا\s*$")
+
+
+def is_gold_calc_trigger(message: types.Message) -> bool:
+    text = (message.text or "").strip()
+    return bool(GOLD_GRAM_REGEX.match(text))
+
+
+@tools_router.message(is_gold_calc_trigger)
+async def handle_gold_gram_calculator(message: types.Message):
+    match = GOLD_GRAM_REGEX.match((message.text or "").strip())
+    if not match:
+        return
+
+    try:
+        grams = float(match.group(1))
+    except ValueError:
+        return
+    if grams <= 0:
+        return
+
+    data = await fetch_tgju_data()
+    geram18_val: Optional[float] = None
+    if data:
+        item = data.get("current", {}).get("geram18")
+        geram18_val = _clean_numeric(item.get("p")) if item else None
+
+    if geram18_val is None:
+        if message.chat.type == "private":
+            await message.reply(
+                "⚠️ در حال حاضر امکان محاسبه قیمت طلا وجود ندارد.",
+                parse_mode="HTML",
+            )
+        return  # Silent Fail در گروه
+
+    price_per_gram_toman = geram18_val / 10
+    total_toman = grams * price_per_gram_toman
+
+    lines = [
+        "🧮 <b>ماشین‌حساب طلا</b>\n",
+        f"وزن: <b>{format_number(grams, 2)}</b> گرم (طلای ۱۸ عیار)",
+        f"قیمت هر گرم: <b>{toman_str(price_per_gram_toman)}</b> تومان",
+        f"\n💰 مجموع: <b>{toman_str(total_toman)}</b> تومان",
+        FOOTER,
+    ]
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
 @tools_router.message(is_gold_trigger)
 async def handle_gold_price(message: types.Message):
     data = await fetch_tgju_data()
