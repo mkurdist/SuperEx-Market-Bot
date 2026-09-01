@@ -18,6 +18,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiohttp import web
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.filters.callback_data import CallbackData
+from aiogram.filters import CommandStart
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------
@@ -45,6 +46,42 @@ TIMEFRAME_MAP = {
     "1h": "1h",
     "4h": "4h",
     "1d": "1d"
+}
+
+# دیکشنری اختصاصی ایموجی‌های کاستوم تلگرام برای ارزهای دیجیتال
+CRYPTO_EMOJIS = {
+    "GRAM": "<tg-emoji emoji-id='5321041614443944130'>💎</tg-emoji>",
+    "TON": "<tg-emoji emoji-id='5204021979174157518'>💎</tg-emoji>",
+    "USDT": "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>",
+    "USDC": "<tg-emoji emoji-id='5204298115506517373'>💵</tg-emoji>",
+    "BTC": "<tg-emoji emoji-id='5206210561364210906'>₿</tg-emoji>",
+    "ETH": "<tg-emoji emoji-id='5206384773827670642'>🔷</tg-emoji>",
+    "SOL": "<tg-emoji emoji-id='5206338061763362251'>🟣</tg-emoji>",
+    "TRX": "<tg-emoji emoji-id='5206292569469760905'>🔴</tg-emoji>",
+    "BNB": "<tg-emoji emoji-id='5204418030993422385'>🟡</tg-emoji>",
+    "XRP": "<tg-emoji emoji-id='5204173131958204067'>✖️</tg-emoji>",
+    "DOGE": "<tg-emoji emoji-id='5204328287651770656'>🐕</tg-emoji>",
+    "ADA": "<tg-emoji emoji-id='5206635372284489921'>🔵</tg-emoji>",
+    "DAI": "<tg-emoji emoji-id='5208870606409317456'>🟡</tg-emoji>",
+    "DOT": "<tg-emoji emoji-id='5208683607828214797'>🩷</tg-emoji>",
+    "MATIC": "<tg-emoji emoji-id='5208848070715916390'>💜</tg-emoji>",
+    "LTC": "<tg-emoji emoji-id='5208615064445139636'>🥈</tg-emoji>",
+    "SHIB": "<tg-emoji emoji-id='5206558148772511929'>🐶</tg-emoji>",
+    "STETH": "<tg-emoji emoji-id='5226934633265904016'>💧</tg-emoji>",
+    "WBTC": "<tg-emoji emoji-id='5224186386772411289'>₿</tg-emoji>",
+    "BCH": "<tg-emoji emoji-id='5226956374390355937'>🟩</tg-emoji>",
+    "LINK": "<tg-emoji emoji-id='5226844752485297224'>🔗</tg-emoji>",
+    "TUSD": "<tg-emoji emoji-id='5224659155297518214'>💵</tg-emoji>",
+    "LEO": "<tg-emoji emoji-id='5224681630861375987'>🦁</tg-emoji>",
+    "AVAX": "<tg-emoji emoji-id='5226653411692262875'>🔺</tg-emoji>",
+    "XLM": "<tg-emoji emoji-id='5224278943317638868'>🚀</tg-emoji>",
+    "XMR": "<tg-emoji emoji-id='5226686306846781788'>🕵️</tg-emoji>",
+    "UNI": "<tg-emoji emoji-id='5226480109761867804'>🦄</tg-emoji>",
+    "OKB": "<tg-emoji emoji-id='5224475648524826880'>⬛</tg-emoji>",
+    "FIL": "<tg-emoji emoji-id='5224599712950139709'>🗄</tg-emoji>",
+    "ETC": "<tg-emoji emoji-id='5224345794483599984'>☘️</tg-emoji>",
+    "HBAR": "<tg-emoji emoji-id='5224436285149560605'>ℏ</tg-emoji>",
+    "ATOM": "<tg-emoji emoji-id='5226961305012811929'>⚛️</tg-emoji>"
 }
 
 # ---------------------------------------------------------
@@ -278,6 +315,7 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     ax = axlist[0]
     ax.set_title(ax.get_title(), pad=10, fontsize=13, color='#e6e6e6')
 
+    # تغییر واترمارک به متن درخواستی
     watermark_text = "Credit by SuperEx"
     ax.text(
         0.5, 0.03, watermark_text,
@@ -344,40 +382,20 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------
 # تشخیص هوشمند نماد کریپتو (Ticker Detection) - بازنویسی‌شده
 # ---------------------------------------------------------
-# چرا این تابع لازم است؟
-# ربات در گروه‌های شلوغ حضور دارد و هندلر تیکر قبلی صرفاً با یک ریجکس
-# ساده (۲ تا ۱۰ حرف انگلیسی) هر پیامی مثل "hi"، "ok"، "buy"، "admin" و
-# همچنین کلیدواژه‌های قابلیت‌های جدید مثل "gold"، "dollar"، "usdt" را هم
-# به‌عنوان نماد کریپتو تفسیر می‌کرد. این هم باعث اسپم پیام خطا در گروه
-# می‌شد و هم باعث تداخل با قابلیت‌های جدید طلا/دلار در tools.py می‌شد
-# (چون هندلرهای خود dp زودتر از روترهای include شده بررسی می‌شوند).
-#
-# راه‌حل: یک Blocklist از کلمات پرکاربرد انگلیسی + کلیدواژه‌های
-# اختصاصی قابلیت‌های جدید، به همراه یک تابع اعتبارسنجی مرکزی.
 COMMON_WORDS_BLOCKLIST = {
-    # کلمات محاوره‌ای/عمومی رایج در گروه‌ها
     "hi", "hello", "hey", "yo", "sup", "ok", "okay", "yes", "no", "yep", "nope",
     "bye", "please", "thanks", "thank", "welcome", "sorry", "lol", "lmao", "wow",
     "nice", "cool", "good", "bad", "great", "ok?", "test", "help", "info", "menu",
-    # کلمات مرتبط با نقش/مدیریت گروه
     "admin", "admins", "mod", "mods", "owner", "dev", "team", "support", "staff",
     "report", "spam", "ban", "kick", "mute", "bot", "bots",
-    # کلمات معاملاتی عمومی (که خودشان نماد نیستند)
     "buy", "sell", "sold", "pump", "dump", "moon", "scam", "fake", "real", "up", "down",
     "long", "short", "hold", "hodl", "new", "old", "price", "chart", "link", "join",
     "group", "channel", "start", "stop",
-    # کلیدواژه‌های اختصاصی قابلیت‌های جدید (طلا/دلار) که در tools.py مدیریت می‌شوند
     "gold", "dollar", "usdt", "tether",
 }
 
 
 def is_valid_ticker_symbol(text: str) -> bool:
-    """
-    بررسی می‌کند که آیا متن ورودی یک نماد کریپتوی معتبر و بی‌خطر برای
-    استعلام از SuperEx است یا نه. متن باید:
-      - فقط شامل حروف انگلیسی (۲ تا ۱۰ کاراکتر) باشد (فارسی هرگز match نمی‌شود)
-      - داخل لیست سیاه کلمات رایج/کلیدواژه‌های اختصاصی نباشد
-    """
     if not text:
         return False
     cleaned = text.strip()
@@ -387,10 +405,38 @@ def is_valid_ticker_symbol(text: str) -> bool:
         return False
     return True
 
-
 # ---------------------------------------------------------
 # Message Handlers
 # ---------------------------------------------------------
+
+@dp.message(CommandStart())
+async def send_welcome_and_tutorials(message: types.Message):
+    """
+    هندلر دستور /start برای ارسال پیام خوش‌آمدگویی و لینک‌های آموزشی
+    """
+    welcome_text = (
+        "<b>به دستیار هوشمند SuperEx ایران خوش آمدید! 🌐</b>\n\n"
+        "💡 شما می‌توانید نام هر ارز (مثل <code>BTC</code>) یا کلماتی مثل <code>طلا</code> و <code>تتر</code> را برای من بفرستید تا اطلاعات لحظه‌ای آن‌ها را به شما نشان دهم.\n\n"
+        "📚 <b>فهرست آموزش‌ها و لینک‌های کاربردی صرافی:</b>\n\n"
+        "📲 <b>نصب و راه‌اندازی:</b>\n"
+        "🔸 <a href='https://t.me/SuperExNews_Iran/130'>لینک‌های دانلود و آپدیت اپلیکیشن</a>\n"
+        "🔸 <a href='https://t.me/SuperExNews_Iran/3400'>آموزش فعال‌سازی اعلانات (نوتیفیکیشن) اپلیکیشن</a>\n\n"
+        "🎓 <b>آموزش‌های معاملاتی (صفر تا صد):</b>\n"
+        "🔹 <a href='https://t.me/SuperExNews_Iran/328'>آموزش ثبت‌نام، واریز/برداشت، اسپات، فیوچرز و رفرال‌گیری</a>\n"
+        "🔹 <a href='https://t.me/SuperExNews_Iran/379'>آموزش تخصصی کار با فیوچرز</a>\n"
+        "🔹 <a href='https://t.me/SuperExNews_Iran/4195'>نحوه معامله طلا و نقره در اسپات و فیوچرز</a>\n"
+        "🔹 <a href='https://t.me/SuperExNews_Iran/3372'>نحوه کپی کردن معاملات در کپی‌تریدینگ</a>\n"
+        "🔹 <a href='https://t.me/SuperExNews_Iran/3359'>نحوه درخواست برای تبدیل شدن به لیدر کپی‌ترید</a>\n\n"
+        "🎁 <b>کسب درآمد، پاداش و رویدادها:</b>\n"
+        "💸 <a href='https://t.me/SuperExNews_Iran/3426'>استیک USDT با سود ثابت ۱۰٪ در سال</a>\n"
+        "🎯 <a href='https://t.me/SuperExNews_Iran/3277'>چالش هفتگی و ماهانه با پاداش نقدی تا ۸۰ دلار</a>\n"
+        "🎟 <a href='https://t.me/SuperExNews_Iran/3634'>نحوه شرکت در لاتاری ۱ دلاری (1USD)</a>\n"
+        "🤝 <a href='https://t.me/SuperExNews_Iran/1621'>ثبت درخواست سفیر شدن یا ایجاد رویداد با لینک اختصاصی</a>\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "💬 در صورت داشتن هرگونه سوال، به گروه پشتیبانی مراجعه کنید."
+    )
+    
+    await message.reply(welcome_text, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.message(F.text == "/test_emojis")
 async def show_all_emojis(message: types.Message):
@@ -404,7 +450,7 @@ async def show_all_emojis(message: types.Message):
         "5204173131958204067", "5204241323153961416"
     ]
     
-    text = "🔍 **لیست تشخیص ایموجی‌ها:**\n\n"
+    text = "🔍 <b>لیست تشخیص ایموجی‌ها:</b>\n\n"
     for i, eid in enumerate(unknown_ids, 1):
         text += f"{i}. <tg-emoji emoji-id='{eid}'>🪙</tg-emoji> ➔ <code>{eid}</code>\n"
     await message.reply(text, parse_mode="HTML")
@@ -419,21 +465,20 @@ async def extract_custom_emoji(message: types.Message):
         for entity in entities:
             if entity.type == "custom_emoji":
                 emoji_char = full_text[entity.offset : entity.offset + entity.length]
-                entry = f"ایموجی: {emoji_char} ➔ آیدی: `{entity.custom_emoji_id}`"
+                entry = f"ایموجی: {emoji_char} ➔ آیدی: <code>{entity.custom_emoji_id}</code>"
                 if entry not in found_emojis:
                     found_emojis.append(entry)
             
     if found_emojis:
-        response_text = "✨ **ایموجی‌های یافت شده در این پیام:**\n\n" + "\n\n".join(found_emojis)
-        await message.reply(response_text, parse_mode="Markdown")
+        response_text = "✨ <b>ایموجی‌های یافت شده در این پیام:</b>\n\n" + "\n\n".join(found_emojis)
+        await message.reply(response_text, parse_mode="HTML")
         return
         
     text = message.text.strip() if message.text else ""
-    # فقط نمادهای معتبر کریپتو (بدون تداخل با کلمات رایج/کلیدواژه‌های طلا و دلار)
     if is_valid_ticker_symbol(text):
         await handle_ticker_input(message)
 
-# فیلتر هوشمند: فقط نمادهای کریپتوی معتبر (مثلاً BTC، ETH) - نه کلمات رایج، نه کلیدواژه‌های تولز
+# فیلتر هوشمند: فقط نمادهای کریپتوی معتبر
 @dp.message(lambda message: is_valid_ticker_symbol(message.text or ""))
 async def handle_ticker_input(message: types.Message):
     symbol = message.text.strip().upper()
@@ -446,7 +491,6 @@ async def handle_ticker_input(message: types.Message):
 
     if "error" in data:
         chart_task.cancel()
-        # Silent Fail در گروه‌های شلوغ - فقط در چت خصوصی خطا نمایش داده می‌شود
         if message.chat.type == "private":
             await processing_msg.edit_text("❌ Symbol not found on SuperEx.")
         else:
@@ -456,13 +500,17 @@ async def handle_ticker_input(message: types.Message):
                 pass
         return
 
+    # خواندن ایموجی کاستوم از دیکشنری (اگر نبود از ایموجی ساده 🪙 استفاده می‌کند)
+    coin_emoji = CRYPTO_EMOJIS.get(data['symbol'], "🪙")
+
+    # تغییر فرمت متن از Markdown به HTML برای اجرای تگ‌های ایموجی کاستوم
     caption = (
-        f"🪙 **{data['symbol']}**\n"
-        f"💰 **P:** ${data['price']}\n"
-        f"📉 **24h:** {data['change_24h']}%\n\n"
-        f"📈 **H:** ${data['high']}\n"
-        f"📉 **L:** ${data['low']}\n"
-        f"📊 **Vol:** {data['volume']} USDT\n"
+        f"{coin_emoji} <b>{data['symbol']}</b>\n"
+        f"💰 <b>P:</b> ${data['price']}\n"
+        f"📉 <b>24h:</b> {data['change_24h']}%\n\n"
+        f"📈 <b>H:</b> ${data['high']}\n"
+        f"📉 <b>L:</b> ${data['low']}\n"
+        f"📊 <b>Vol:</b> {data['volume']} USDT\n"
     )
 
     try:
@@ -472,13 +520,13 @@ async def handle_ticker_input(message: types.Message):
         await message.reply_photo(
             photo=photo,
             caption=caption,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=get_price_keyboard(symbol)
         )
         await processing_msg.delete()
     except Exception as e:
         logging.error(f"Chart generation error: {e}")
-        await message.reply(caption + "\n\n*(Chart unavailable)*", parse_mode="Markdown")
+        await message.reply(caption + "\n\n<i>(Chart unavailable)</i>", parse_mode="HTML")
         await processing_msg.delete()
 
 @dp.callback_query(ChartCallback.filter())
@@ -493,7 +541,7 @@ async def process_chart_timeframe(query: types.CallbackQuery, callback_data: Cha
         new_photo = types.InputMediaPhoto(
             media=BufferedInputFile(chart_bytes, filename=f"{symbol}_{timeframe}.png"),
             caption=query.message.caption,
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         
         await query.message.edit_media(
@@ -505,14 +553,8 @@ async def process_chart_timeframe(query: types.CallbackQuery, callback_data: Cha
         await query.answer("Failed to update chart.", show_alert=True)
 
 # ---------------------------------------------------------
-# اتصال روتر ۳ قابلیت جدید (طلا/سکه، دلار/تتر، ماشین‌حساب کریپتو)
+# اتصال روتر ۳ قابلیت جدید
 # ---------------------------------------------------------
-# نکته: هندلرهای بالا مستقیماً روی dp ثبت شده‌اند و طبق رفتار aiogram
-# زودتر از روترهای include شده بررسی می‌شوند. به همین دلیل Blocklist
-# بالا (COMMON_WORDS_BLOCKLIST) تضمین می‌کند که پیام‌های حاوی
-# "gold"/"dollar"/"usdt" هرگز توسط handle_ticker_input مصرف نشوند و
-# سالم به tools_router برسند. برای متون فارسی (طلا، سکه، دلار، تتر)
-# اصلاً تداخلی وجود ندارد چون ریجکس تیکر فقط حروف لاتین را می‌پذیرد.
 dp.include_router(tools_router)
 
 # ---------------------------------------------------------
