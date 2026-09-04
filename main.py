@@ -3,7 +3,6 @@ import os
 import io
 import time
 import uuid
-import json
 import logging
 import re
 import aiohttp
@@ -40,6 +39,9 @@ dp = Dispatcher()
 
 # نشست مشترک برای سرعت بخشیدن به ریکوئست‌های API
 shared_session: aiohttp.ClientSession = None
+
+# متغیر سراسری برای ذخیره نرخ تتر (آپدیت در پس‌زمینه)
+USDT_TOMAN_RATE = None
 
 TIMEFRAME_MAP = {
     "1m": "1m",
@@ -95,10 +97,10 @@ CHART_RENDER_EXECUTOR = ThreadPoolExecutor(
 
 CHART_RENDER_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_CHARTS", "4")))
 
-CHART_CACHE_TTL = 30  # افزایش کش چارت به ۳۰ ثانیه برای پایداری در گروه‌ها
+CHART_CACHE_TTL = 30  
 CHART_CACHE: dict = {}
 
-PRICE_CACHE_TTL = 10  # افزایش کش قیمت به ۱۰ ثانیه
+PRICE_CACHE_TTL = 10  
 PRICE_CACHE: dict = {}
 
 _CACHE_MAX_ENTRIES = 300  
@@ -148,15 +150,68 @@ CHART_STYLE = mpf.make_mpf_style(
     }
 )
 
-# ---------------------------------------------------------
-# Callback Data Factories
-# ---------------------------------------------------------
 class ChartCallback(CallbackData, prefix="chart"):
     symbol: str
     timeframe: str
 
 # ---------------------------------------------------------
-# API Helper Functions (Using Global Session)
+# Background Task: Fetch Tether/Toman Rate
+# ---------------------------------------------------------
+async def fetch_bitpin_usdt() -> float | None:
+    url = "https://api.bitpin.ir/v1/mkt/markets/"
+    try:
+        async with shared_session.get(url, timeout=5.0) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                markets = data.get("results", []) if isinstance(data, dict) else data
+                for m in markets:
+                    code = m.get("code") or f"{m.get('currency1')}_{m.get('currency2')}"
+                    if code == "USDT_IRT":
+                        return float(m.get("price"))
+    except Exception as e:
+        logging.error(f"Bitpin fetch error: {e}")
+    return None
+
+async def fetch_wallex_usdt() -> float | None:
+    url = "https://api.wallex.ir/v1/markets"
+    try:
+        async with shared_session.get(url, timeout=5.0) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                symbols = data.get("result", {}).get("symbols", {})
+                item = symbols.get("USDTTMN")
+                if item:
+                    return float(item.get("stats", {}).get("lastPrice"))
+    except Exception as e:
+        logging.error(f"Wallex fetch error: {e}")
+    return None
+
+async def update_tether_rate_loop():
+    """تایمر پس‌زمینه برای آپدیت نرخ تتر هر ۲ دقیقه بدون ایجاد فشار روی سرور"""
+    global USDT_TOMAN_RATE
+    while True:
+        try:
+            bitpin_rate, wallex_rate = await asyncio.gather(
+                fetch_bitpin_usdt(),
+                fetch_wallex_usdt(),
+                return_exceptions=True
+            )
+            
+            valid_rates = []
+            if isinstance(bitpin_rate, float): valid_rates.append(bitpin_rate)
+            if isinstance(wallex_rate, float): valid_rates.append(wallex_rate)
+            
+            if valid_rates:
+                USDT_TOMAN_RATE = sum(valid_rates) / len(valid_rates)
+                logging.info(f"🔄 USDT/IRT Rate Updated in Background: {USDT_TOMAN_RATE}")
+                
+        except Exception as e:
+            logging.error(f"Error in update_tether_rate_loop: {e}")
+        
+        await asyncio.sleep(120)  # صبر برای 2 دقیقه
+
+# ---------------------------------------------------------
+# API Helper Functions 
 # ---------------------------------------------------------
 def get_superex_headers() -> dict:
     return {
@@ -182,11 +237,10 @@ async def fetch_price_data(symbol: str) -> dict:
                 if data_obj and data_obj.get("newPrice"):
                     price = float(data_obj.get("newPrice", "0.0"))
                     
-                    # --- فیلتر هوشمند برای جلوگیری از کارت قیمت صفر ---
+                    # فیلتر هوشمند برای جلوگیری از چاپ ارزهای نامعتبر با قیمت صفر
                     if price == 0.0:
-                        return {"error": "Symbol not found on SuperEx."}
-                    # ---------------------------------------------------
-                    
+                        return {"error": "Symbol not found or invalid."}
+                        
                     sum_number = float(data_obj.get("sumNumber", "0.0"))
                     volume_usdt = price * sum_number
                     
@@ -317,7 +371,6 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     ax = axlist[0]
     ax.set_title(ax.get_title(), pad=10, fontsize=13, color='#e6e6e6')
 
-    # تغییر واترمارک به متن درخواستی (بدون تغییر تنظیمات استایل)
     watermark_text = "Credit by SuperEx"
     ax.text(
         0.5, 0.03, watermark_text,
@@ -327,9 +380,10 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
     buf = io.BytesIO()
     try:
+        # افزایش pad_inches به 0.3 برای ایجاد حاشیه (تنفس) بیشتر دور کادر نمودار
         fig.savefig(
             buf, dpi=130,
-            bbox_inches='tight', pad_inches=0.1,
+            bbox_inches='tight', pad_inches=0.3,
             facecolor=fig.get_facecolor(), edgecolor='none'
         )
         return buf.getvalue()
@@ -396,7 +450,6 @@ COMMON_WORDS_BLOCKLIST = {
     "gold", "dollar", "usdt", "tether",
 }
 
-# کامپایل شدن Regex برای افزایش شدید سرعت در گروه‌های شلوغ
 TICKER_REGEX = re.compile(r"^[a-zA-Z]{2,10}$")
 
 def is_valid_ticker_symbol(text: str) -> bool:
@@ -414,9 +467,6 @@ def is_valid_ticker_symbol(text: str) -> bool:
 # ---------------------------------------------------------
 @dp.message(CommandStart())
 async def send_welcome_and_tutorials(message: types.Message):
-    """
-    هندلر دستور /start برای ارسال پیام خوش‌آمدگویی و لینک‌های آموزشی
-    """
     welcome_text = (
         "<b>به دستیار هوشمند SuperEx ایران خوش آمدید! 🌐</b>\n\n"
         "💡 شما می‌توانید نام هر ارز (مثل <code>BTC</code>) یا کلماتی مثل <code>طلا</code> و <code>تتر</code> را برای من بفرستید تا اطلاعات لحظه‌ای آن‌ها را به شما نشان دهم.\n\n"
@@ -442,7 +492,6 @@ async def send_welcome_and_tutorials(message: types.Message):
     await message.reply(welcome_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
-# فیلتر هوشمند: فقط نمادهای کریپتوی معتبر
 @dp.message(lambda message: is_valid_ticker_symbol(message.text or ""))
 async def handle_ticker_input(message: types.Message):
     symbol = message.text.strip().upper()
@@ -454,14 +503,32 @@ async def handle_ticker_input(message: types.Message):
 
     if "error" in data:
         chart_task.cancel()
-        return  # سکوت مطلق: اگر ارز پیدا نشد بدون هیچ پیامی خارج می‌شود
+        return  
 
-    # خواندن ایموجی کاستوم از دیکشنری (اگر نبود از ایموجی ساده 🪙 استفاده می‌کند)
     coin_emoji = CRYPTO_EMOJIS.get(data['symbol'], "🪙")
+    
+    # ----------------------------------------------------
+    # محاسبه قیمت تومانی بر اساس نرخ کش شده پس‌زمینه
+    # ----------------------------------------------------
+    toman_line = ""
+    if USDT_TOMAN_RATE is not None and data.get('price'):
+        try:
+            usd_price = float(data['price'])
+            toman_price = usd_price * USDT_TOMAN_RATE
+            # فرمت‌دهی: اگر ارزش از 100 تومان بیشتر بود، بدون اعشار (با جداکننده) چاپ شود
+            if toman_price >= 100:
+                toman_formatted = f"{toman_price:,.0f}"
+            else:
+                toman_formatted = f"{toman_price:,.2f}"
+            
+            toman_line = f"🇮🇷 <b>Toman:</b> {toman_formatted} تومان\n"
+        except ValueError:
+            pass
 
     caption = (
         f"{coin_emoji} <b>{data['symbol']}</b>\n"
         f"💰 <b>P:</b> ${data['price']}\n"
+        f"{toman_line}"
         f"📉 <b>24h:</b> {data['change_24h']}%\n\n"
         f"📈 <b>H:</b> ${data['high']}\n"
         f"📉 <b>L:</b> ${data['low']}\n"
@@ -518,7 +585,6 @@ async def health_check(request):
 
 async def main():
     global shared_session
-    # ایجاد یک Session دائمی و مشترک برای دریافت سریع دیتا
     shared_session = aiohttp.ClientSession()
     
     app = web.Application()
@@ -533,11 +599,14 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
+    # اجرای تسک پس‌زمینه برای آپدیت نرخ تتر
+    asyncio.create_task(update_tether_rate_loop())
+
     logging.info("🚀 Bot polling started")
     try:
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
-        await shared_session.close() # بستن امن Session هنگام خاموش شدن
+        await shared_session.close()
         CHART_RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 if __name__ == "__main__":
