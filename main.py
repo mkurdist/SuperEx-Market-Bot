@@ -371,7 +371,7 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     ax = axlist[0]
     ax.set_title(ax.get_title(), pad=10, fontsize=13, color='#e6e6e6')
 
-    watermark_text = "Credit by SuperEx"
+    watermark_text = "created by @SuperEXPrice_bot | @SuperexIR"
     ax.text(
         0.5, 0.03, watermark_text,
         transform=ax.transAxes,
