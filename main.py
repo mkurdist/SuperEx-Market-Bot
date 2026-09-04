@@ -505,7 +505,7 @@ async def process_chart_timeframe(query: types.CallbackQuery, callback_data: Cha
         chart_bytes = await generate_chart_image(symbol, timeframe)
         new_photo = types.InputMediaPhoto(
             media=BufferedInputFile(chart_bytes, filename=f"{symbol}_{timeframe}.png"),
-            caption=query.message.caption,
+            caption=query.message.html_text,
             parse_mode="HTML"
         )
         
