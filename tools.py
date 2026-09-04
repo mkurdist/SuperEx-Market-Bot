@@ -350,9 +350,9 @@ async def handle_gold_price(message: types.Message):
 
     if chart_bytes:
         photo = BufferedInputFile(chart_bytes, filename="world_gold_chart.png")
-        await message.reply_photo(photo=photo, caption=caption, parse_mode="HTML")
+        await message.reply_photo(photo=photo, caption=caption, parse_mode="HTML", disable_web_page_preview=True)
     else:
-        await message.reply(caption, parse_mode="HTML")
+        await message.reply(caption, parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ===========================================================
@@ -421,7 +421,7 @@ async def handle_dollar_price(message: types.Message):
         lines.append(f"{USDT_EMOJI} میانگین قیمت تتر : <i>در دسترس نیست</i>")
 
     lines.append(FOOTER)
-    await message.reply("\n".join(lines), parse_mode="HTML")
+    await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ===========================================================
@@ -467,7 +467,7 @@ async def handle_gold_gram_calculator(message: types.Message):
         f"\n{E_TOMAN} مجموع : <code>{total_num}</code>{total_suffix} تومان",
         FOOTER,
     ]
-    await message.reply("\n".join(lines), parse_mode="HTML")
+    await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 # ----------- ماشین‌حساب دلار و تتر -----------
 @tools_router.message(lambda msg: is_valid_calc_trigger(msg, DOLLAR_CALC_REGEX))
@@ -498,7 +498,7 @@ async def handle_dollar_calculator(message: types.Message):
         f"{E_TOMAN} معادل تومان : <code>{total_num}</code>{total_suffix} تومان",
         FOOTER,
     ]
-    await message.reply("\n".join(lines), parse_mode="HTML")
+    await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 # ----------- ماشین‌حساب سایر کریپتوها -----------
 BINANCE_PRICE_URL = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -571,4 +571,4 @@ async def handle_crypto_calculator(message: types.Message):
         lines.append(f"{E_TOTAL} مجموع تومانی : <i>در دسترس نیست</i>")
 
     lines.append(FOOTER)
-    await message.reply("\n".join(lines), parse_mode="HTML")
+    await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
