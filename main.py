@@ -371,8 +371,10 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     ax = axlist[0]
     
     # عنوان دقیقاً در مرکز و با ۱ پیکسل (pad=3) فاصله از خط کادر بالا تنظیم شد
-    ax.set_title(f"{symbol.upper().replace('USDT', '')}/USDT | {timeframe}", pad=3, fontsize=13, color='#e6e6e6', ha='center')
-
+    ax.set_title(f"{symbol.upper().replace('USDT', '')}/USDT | {timeframe}", pad=10, fontsize=13, color='#e6e6e6', ha='center')
+# ایجاد فضای خالی در سمت راست نمودار
+    x_min, x_max = ax.get_xlim()
+    ax.set_xlim(x_min, x_max + 2)
     watermark_text = "created by @SuperEXPrice_bot | @SuperexIR"
     ax.text(
         0.5, 0.03, watermark_text,
