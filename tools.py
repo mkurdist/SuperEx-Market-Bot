@@ -95,7 +95,7 @@ def format_number(value: Any, decimals: int = 2) -> str:
         return "N/A"
     return f"{val:,.{decimals}f}"
 
-# تابع جدید برای تبدیل اعداد بزرگ به معادل فارسی (هزار، میلیون، میلیارد)
+# تابع تبدیل اعداد بزرگ به معادل فارسی (هزار، میلیون، میلیارد)
 def get_persian_abbrev(val: float) -> tuple[str, str]:
     val = _clean_numeric(val)
     if val is None:
@@ -133,6 +133,16 @@ def is_valid_calc_trigger(message: types.Message, regex_pattern: re.Pattern) -> 
     if message.reply_to_message is not None:
         return False
     return bool(regex_pattern.match(normalize_text(message.text)))
+
+
+# --- متغیرهای سراسری برای ایموجی‌های سه‌بعدی ---
+E_USD = "<tg-emoji emoji-id='5197434882321567830'>💲</tg-emoji>"
+E_TOMAN = "<tg-emoji emoji-id='5472030678633684592'>💸</tg-emoji>"
+E_TOTAL = "<tg-emoji emoji-id='5375296873982604963'>💰</tg-emoji>"
+E_HEADER_CONVERT = "<tg-emoji emoji-id='5402186569006210455'>🔄</tg-emoji>"
+E_COIN = "<tg-emoji emoji-id='5206210561364210906'>🪙</tg-emoji>"
+USDT_EMOJI = "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>"
+
 
 # ===========================================================
 # 1) Gold Service
@@ -248,9 +258,12 @@ async def handle_gold_price(message: types.Message):
     if geram18_val is None and ons_val is None:
         return  # Silent Fail
 
-    lines = ["🥇 <b>قیمت طلا</b>\n"]
-    if geram18_val is not None: lines.append(f"• طلای ۱۸ عیار: <b>{geram18_val / 10:,.0f}</b> تومان")
-    if ons_val is not None: lines.append(f"🌍 انس جهانی طلا: <b>{ons_val:,.2f}</b> دلار")
+    lines = ["🥇 <b>قیمت لحظه‌ای طلا</b>\n"]
+    if geram18_val is not None: 
+        lines.append(f"{E_TOTAL} طلای ۱۸ عیار : <code>{geram18_val / 10:,.0f}</code> تومان")
+    if ons_val is not None: 
+        lines.append(f"🌍 انس جهانی طلا : <code>{ons_val:,.2f}</code> دلار")
+    
     lines.append(FOOTER)
     caption = "\n".join(lines)
 
@@ -269,9 +282,6 @@ async def handle_gold_price(message: types.Message):
 # 2) Dollar & Tether Service
 # ===========================================================
 DOLLAR_KEYWORDS = {"دلار", "تتر", "usdt", "dollar", "قیمت دلار", "قیمت تتر", "نرخ دلار"}
-
-# ایموجی سه‌بعدی اختصاصی برای ماشین‌حساب و استعلام دلار
-USDT_EMOJI = "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>"
 
 async def fetch_tgju_dollar_toman() -> Optional[float]:
     data = await fetch_tgju_data()
@@ -322,15 +332,16 @@ async def handle_dollar_price(message: types.Message):
         return  # Silent Fail
 
     lines = [f"{USDT_EMOJI} <b>نرخ لحظه‌ای دلار و تتر</b>\n"]
-    if tgju_dollar is not None: lines.append(f"🏦 دلار بازار آزاد: <b>{toman_str(tgju_dollar)}</b> تومان\n")
+    if tgju_dollar is not None: 
+        lines.append(f"🏦 دلار بازار آزاد : <code>{toman_str(tgju_dollar)}</code> تومان\n")
 
     if sources:
         avg_price = sum(_clean_numeric(s["price_toman"]) for s in sources) / len(sources)
         changes = [c for c in [_clean_numeric(s.get("change")) for s in sources] if c is not None]
         avg_change_str = _format_change(sum(changes) / len(changes)) if changes else ""
-        lines.append(f"{USDT_EMOJI} میانگین قیمت تتر: <b>{toman_str(avg_price)}</b> تومان{avg_change_str}")
+        lines.append(f"{USDT_EMOJI} میانگین قیمت تتر : <code>{toman_str(avg_price)}</code> تومان <b>{avg_change_str}</b>")
     else:
-        lines.append(f"{USDT_EMOJI} میانگین قیمت تتر: <i>در دسترس نیست</i>")
+        lines.append(f"{USDT_EMOJI} میانگین قیمت تتر : <i>در دسترس نیست</i>")
 
     lines.append(FOOTER)
     await message.reply("\n".join(lines), parse_mode="HTML")
@@ -371,11 +382,12 @@ async def handle_gold_gram_calculator(message: types.Message):
     total_toman = grams * price_per_gram_toman
     
     total_num, total_suffix = get_persian_abbrev(total_toman)
+    amount_str = f"{grams:,.0f}" if grams.is_integer() else f"{grams:,.2f}".rstrip('0').rstrip('.')
 
     lines = [
-        f"وزن: <b>{format_number(grams, 2)}</b> گرم (طلای ۱۸ عیار)",
-        f"قیمت هر گرم: <b>{toman_str(price_per_gram_toman)}</b> تومان",
-        f"\n💰 مجموع: <b>{total_num}</b>{total_suffix} تومان",
+        f"⚖️ وزن : <code>{amount_str}</code> گرم (طلای ۱۸ عیار)",
+        f"{E_USD} قیمت هر گرم : <code>{toman_str(price_per_gram_toman)}</code> تومان",
+        f"\n{E_TOMAN} مجموع : <code>{total_num}</code>{total_suffix} تومان",
         FOOTER,
     ]
     await message.reply("\n".join(lines), parse_mode="HTML")
@@ -399,17 +411,11 @@ async def handle_dollar_calculator(message: types.Message):
 
     total_toman = amount * toman_rate
     
-    # ایموجی‌های دقیق ارسالی
-    E_HEADER = "<tg-emoji emoji-id='5402186569006210455'>🔄</tg-emoji>"
-    E_USD = "<tg-emoji emoji-id='5197434882321567830'>💲</tg-emoji>"
-    E_TOMAN = "<tg-emoji emoji-id='5472030678633684592'>💸</tg-emoji>"
-    
-    # برداشتن ممیزها برای اعداد صحیح (مثلا 10 به جای 10.00)
     amount_str = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.2f}".rstrip('0').rstrip('.')
     total_num, total_suffix = get_persian_abbrev(total_toman)
     
     lines = [
-        f"{E_HEADER} <b>تبدیل دلار به تومان</b>\n",
+        f"{E_HEADER_CONVERT} <b>تبدیل دلار به تومان</b>\n",
         f"{E_USD} مقدار : <code>{amount_str}</code> {currency_name}",
         f"{E_USD} قیمت تتر : <code>{toman_str(toman_rate)}</code> تومان",
         f"{E_TOMAN} معادل تومان : <code>{total_num}</code>{total_suffix} تومان",
@@ -466,22 +472,24 @@ async def handle_crypto_calculator(message: types.Message):
     toman_rate = await get_avg_usdt_toman_rate()
     usd_value = amount * price_usd
     amount_decimals = 8 if amount < 1 else 4
+    
+    amount_str = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.{amount_decimals}f}".rstrip('0').rstrip('.')
 
     lines = [
-        f"مقدار: <b>{format_number(amount, amount_decimals)}</b> {symbol}",
-        f"قیمت واحد: <b>${format_number(price_usd, 4)}</b>",
+        f"{E_COIN} مقدار : <code>{amount_str}</code> {symbol}",
+        f"{E_USD} قیمت واحد : <code>${format_number(price_usd, 4)}</code>",
     ]
 
     if toman_rate:
         toman_value = usd_value * toman_rate
         total_num, total_suffix = get_persian_abbrev(toman_value)
         
-        lines.append(f"نرخ مبنای تتر: <b>{toman_str(toman_rate)}</b> تومان")
-        lines.append(f"\n💵 مجموع دلاری: <b>${format_number(usd_value, 2)}</b>")
-        lines.append(f"💰 مجموع تومانی: <b>{total_num}</b>{total_suffix} تومان")
+        lines.append(f"{E_USD} نرخ مبنای تتر : <code>{toman_str(toman_rate)}</code> تومان")
+        lines.append(f"\n{E_TOMAN} مجموع دلاری : <code>${format_number(usd_value, 2)}</code>")
+        lines.append(f"{E_TOTAL} مجموع تومانی : <code>{total_num}</code>{total_suffix} تومان")
     else:
-        lines.append(f"\n💵 مجموع دلاری: <b>${format_number(usd_value, 2)}</b>")
-        lines.append("💰 مجموع تومانی: <i>در دسترس نیست</i>")
+        lines.append(f"\n{E_TOMAN} مجموع دلاری : <code>${format_number(usd_value, 2)}</code>")
+        lines.append(f"{E_TOTAL} مجموع تومانی : <i>در دسترس نیست</i>")
 
     lines.append(FOOTER)
     await message.reply("\n".join(lines), parse_mode="HTML")
