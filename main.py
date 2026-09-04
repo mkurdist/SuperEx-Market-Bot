@@ -54,7 +54,7 @@ CRYPTO_EMOJIS = {
     "TON": "<tg-emoji emoji-id='5204021979174157518'>💎</tg-emoji>",
     "USDT": "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>",
     "USDC": "<tg-emoji emoji-id='5204298115506517373'>💵</tg-emoji>",
-    "BTC": "<tg-emoji emoji-id='5206210561364210906'>₿</tg-emoji>",
+    "BTC": "<tg-emoji emoji-id='5206210561364210906'>🪙</tg-emoji>", # اصلاح شد (متن متنی حذف و ایموجی واقعی جایگزین شد)
     "ETH": "<tg-emoji emoji-id='5206384773827670642'>🔷</tg-emoji>",
     "SOL": "<tg-emoji emoji-id='5206338061763362251'>🟣</tg-emoji>",
     "TRX": "<tg-emoji emoji-id='5206292569469760905'>🔴</tg-emoji>",
@@ -68,7 +68,7 @@ CRYPTO_EMOJIS = {
     "LTC": "<tg-emoji emoji-id='5208615064445139636'>🥈</tg-emoji>",
     "SHIB": "<tg-emoji emoji-id='5206558148772511929'>🐶</tg-emoji>",
     "STETH": "<tg-emoji emoji-id='5226934633265904016'>💧</tg-emoji>",
-    "WBTC": "<tg-emoji emoji-id='5224186386772411289'>₿</tg-emoji>",
+    "WBTC": "<tg-emoji emoji-id='5224186386772411289'>🪙</tg-emoji>", # اصلاح شد
     "BCH": "<tg-emoji emoji-id='5226956374390355937'>🟩</tg-emoji>",
     "LINK": "<tg-emoji emoji-id='5226844752485297224'>🔗</tg-emoji>",
     "TUSD": "<tg-emoji emoji-id='5224659155297518214'>💵</tg-emoji>",
@@ -80,7 +80,7 @@ CRYPTO_EMOJIS = {
     "OKB": "<tg-emoji emoji-id='5224475648524826880'>⬛</tg-emoji>",
     "FIL": "<tg-emoji emoji-id='5224599712950139709'>🗄</tg-emoji>",
     "ETC": "<tg-emoji emoji-id='5224345794483599984'>☘️</tg-emoji>",
-    "HBAR": "<tg-emoji emoji-id='5224436285149560605'>ℏ</tg-emoji>",
+    "HBAR": "<tg-emoji emoji-id='5224436285149560605'>🪙</tg-emoji>", # اصلاح شد
     "ATOM": "<tg-emoji emoji-id='5226961305012811929'>⚛️</tg-emoji>"
 }
 
