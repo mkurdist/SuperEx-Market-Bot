@@ -229,7 +229,7 @@ async def fetch_tgju_data() -> Optional[dict]:
     return None
 
 # استفاده از نماد اسپات طلا بجای فیوچرز برای چارت بی‌نقص و ۲۴ ساعته
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
 _GOLD_CHART_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 _GOLD_CHART_CACHE_TTL = 60.0
 
