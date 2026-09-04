@@ -181,8 +181,13 @@ async def fetch_price_data(symbol: str) -> dict:
                 
                 if data_obj and data_obj.get("newPrice"):
                     price = float(data_obj.get("newPrice", "0.0"))
-                    sum_number = float(data_obj.get("sumNumber", "0.0"))
                     
+                    # --- فیلتر هوشمند برای جلوگیری از کارت قیمت صفر ---
+                    if price == 0.0:
+                        return {"error": "Symbol not found on SuperEx."}
+                    # ---------------------------------------------------
+                    
+                    sum_number = float(data_obj.get("sumNumber", "0.0"))
                     volume_usdt = price * sum_number
                     
                     if volume_usdt >= 1000:
