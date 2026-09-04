@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 import aiohttp
+import pandas as pd
+import mplfinance as mpf
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -36,6 +38,24 @@ logger = logging.getLogger("tools")
 tools_router = Router(name="tools_router")
 
 _CHART_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gold-chart")
+
+# ===========================================================
+# Chart Styles (دقیقاً مشابه کریپتو)
+# ===========================================================
+_MARKET_COLORS = mpf.make_marketcolors(
+    up='#00d964', down='#ff3b3b', edge='inherit', wick='inherit', volume='in', ohlc='i'
+)
+
+CHART_STYLE = mpf.make_mpf_style(
+    marketcolors=_MARKET_COLORS, base_mpf_style='binance', facecolor='#000000',   
+    edgecolor='#555555', figcolor='#000000', gridcolor='#222222', gridstyle='--',
+    y_on_right=False,      
+    rc={
+        'font.family': 'sans-serif', 'axes.titleweight': 'normal', 'axes.titlesize': 13,
+        'axes.titlecolor': '#e6e6e6', 'axes.labelcolor': '#cfcfcf', 'xtick.color': '#9a9a9a',
+        'ytick.color': '#9a9a9a', 'text.color': '#9a9a9a',        
+    }
+)
 
 # ===========================================================
 # Shared HTTP / formatting helpers
@@ -95,7 +115,6 @@ def format_number(value: Any, decimals: int = 2) -> str:
         return "N/A"
     return f"{val:,.{decimals}f}"
 
-# تابع تبدیل اعداد بزرگ به معادل فارسی (هزار، میلیون، میلیارد)
 def get_persian_abbrev(val: float) -> tuple[str, str]:
     val = _clean_numeric(val)
     if val is None:
@@ -114,9 +133,6 @@ def get_persian_abbrev(val: float) -> tuple[str, str]:
 
 FOOTER = "\n<i>@SuperExFa_bot</i>"
 
-# ===========================================================
-# Helper Functions: Smart Triggers & Logic
-# ===========================================================
 def normalize_text(text: str) -> str:
     if not text:
         return ""
@@ -143,8 +159,6 @@ E_HEADER_CONVERT = "<tg-emoji emoji-id='5402186569006210455'>🔄</tg-emoji>"
 USDT_EMOJI = "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>"
 E_18K = "<tg-emoji emoji-id='5242306076405148889'>💰</tg-emoji>"
 E_OUNCE = "<tg-emoji emoji-id='5242751808111125319'>🌍</tg-emoji>"
-
-# ایموجی جایگزین برای ارزهایی که در لیست نیستند
 DEFAULT_CRYPTO_EMOJI = "<tg-emoji emoji-id='5242390476807479264'>🪙</tg-emoji>"
 
 CRYPTO_EMOJIS = {
@@ -214,7 +228,8 @@ async def fetch_tgju_data() -> Optional[dict]:
             return data
     return None
 
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+# استفاده از نماد اسپات طلا بجای فیوچرز برای چارت بی‌نقص و ۲۴ ساعته
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
 _GOLD_CHART_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 _GOLD_CHART_CACHE_TTL = 60.0
 
@@ -225,44 +240,62 @@ async def _fetch_gold_series(interval: str, range_: str):
     try:
         result = data["chart"]["result"][0]
         timestamps = result["timestamp"]
-        closes = result["indicators"]["quote"][0]["close"]
-        points = [(t, c) for t, c in zip(timestamps, closes) if c is not None]
-        return points if len(points) >= 2 else None
+        quote = result["indicators"]["quote"][0]
+        
+        opens = quote["open"]
+        highs = quote["high"]
+        lows = quote["low"]
+        closes = quote["close"]
+        volumes = quote.get("volume", [0] * len(timestamps))
+        
+        parsed_data = []
+        for t, o, h, l, c, v in zip(timestamps, opens, highs, lows, closes, volumes):
+            if c is not None and o is not None and h is not None and l is not None:
+                parsed_data.append({
+                    "Date": pd.to_datetime(t, unit="s"),
+                    "Open": float(o),
+                    "High": float(h),
+                    "Low": float(l),
+                    "Close": float(c),
+                    "Volume": float(v)
+                })
+        return parsed_data if len(parsed_data) >= 2 else None
     except (KeyError, IndexError, TypeError):
         return None
 
 async def fetch_world_gold_series():
-    points = await _fetch_gold_series("15m", "1d")
-    if not points: points = await _fetch_gold_series("1h", "5d")
-    return points
+    parsed_data = await _fetch_gold_series("15m", "1d")
+    if not parsed_data: parsed_data = await _fetch_gold_series("1h", "5d")
+    return parsed_data
 
-def _render_world_gold_chart_sync(points) -> bytes:
-    times = [datetime.fromtimestamp(t, tz=timezone.utc) for t, _ in points]
-    prices = [p for _, p in points]
+def _render_world_gold_chart_sync(parsed_data) -> bytes:
+    df = pd.DataFrame(parsed_data)
+    df.set_index("Date", inplace=True)
+    df.sort_index(inplace=True)
 
-    fig, ax = plt.subplots(figsize=(10, 5), facecolor="#000000")
-    ax.set_facecolor("#000000")
-    ax.plot(times, prices, color="#FFD700", linewidth=1.8)
-    ax.fill_between(times, prices, min(prices), color="#FFD700", alpha=0.08)
+    fig, axlist = mpf.plot(
+        df, type='candle', style=CHART_STYLE, volume=False,
+        ylabel='Price (USD)', datetime_format='%H:%M',
+        xrotation=0, tight_layout=True, returnfig=True, figsize=(10, 6)
+    )
+    
+    ax = axlist[0]
+    # تنظیم دقیق فاصله ۱۰ پیکسلی مثل چارت کریپتو
+    ax.set_title("XAU/USD | World Gold Ounce", pad=10, fontsize=13, color='#e6e6e6', ha='center')
 
-    ax.set_title("XAU/USD | World Gold Ounce", color="#e6e6e6", fontsize=13, pad=10)
-    ax.set_ylabel("Price (USD)", color="#cfcfcf")
-    ax.tick_params(colors="#9a9a9a")
-    for spine in ax.spines.values(): spine.set_color("#555555")
-    ax.grid(True, color="#222222", linestyle="--", linewidth=0.5)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-    fig.autofmt_xdate(rotation=0)
+    # ایجاد فضای خالی در سمت راست
+    x_min, x_max = ax.get_xlim()
+    ax.set_xlim(x_min, x_max + 2)
 
     ax.text(
         0.5, 0.03, "created by @SuperExPrice_bot | @SuperexIR",
         transform=ax.transAxes, ha="center", va="bottom",
-        fontsize=9, color="#9a9a9a",
+        fontsize=9.5, color="#9a9a9a", fontweight="normal"
     )
 
     buf = io.BytesIO()
     try:
-        fig.tight_layout()
-        fig.savefig(buf, dpi=130, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.15)
+        fig.savefig(buf, dpi=130, bbox_inches="tight", pad_inches=0.3, facecolor=fig.get_facecolor(), edgecolor="none")
         return buf.getvalue()
     finally:
         buf.close()
@@ -272,10 +305,10 @@ async def generate_world_gold_chart() -> Optional[bytes]:
     now = time.time()
     if _GOLD_CHART_CACHE["data"] and (now - _GOLD_CHART_CACHE["ts"]) < _GOLD_CHART_CACHE_TTL:
         return _GOLD_CHART_CACHE["data"]
-    points = await fetch_world_gold_series()
-    if not points: return None
+    parsed_data = await fetch_world_gold_series()
+    if not parsed_data: return None
     loop = asyncio.get_running_loop()
-    image_bytes = await loop.run_in_executor(_CHART_EXECUTOR, _render_world_gold_chart_sync, points)
+    image_bytes = await loop.run_in_executor(_CHART_EXECUTOR, _render_world_gold_chart_sync, parsed_data)
     _GOLD_CHART_CACHE["data"] = image_bytes
     _GOLD_CHART_CACHE["ts"] = now
     return image_bytes
@@ -514,7 +547,6 @@ async def handle_crypto_calculator(message: types.Message):
     
     amount_str = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.{amount_decimals}f}".rstrip('0').rstrip('.')
 
-    # دریافت ایموجی اختصاصی ارز (اگر نبود، ایموجی دیفالت استفاده می‌شود)
     coin_emoji = CRYPTO_EMOJIS.get(symbol, DEFAULT_CRYPTO_EMOJI)
 
     lines = [
