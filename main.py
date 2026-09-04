@@ -459,22 +459,22 @@ async def handle_ticker_input(message: types.Message):
             
             caption = (
                 f"{coin_emoji} <b>{data['symbol']}</b>\n"
-                f"{E_P} P: {p_val} ≈ {p_tom} تومان\n"
-                f"{E_24H} 24h: {change_str}%\n\n"
-                f"{E_H} H: ${h_val} | {h_tom} تومان\n"
-                f"{E_L} L: ${l_val} | {l_tom} تومان\n"
-                f"{E_VOL} Vol: {vol_val} USDT\n"
-                f"{E_USDT} USDT: {usdt_val} تومان\n"
+                f"{E_P} P: {p_val} ≈ <b>{p_tom} تومان</b>\n"
+                f"{E_24H} 24h: <b>{change_str}%</b>\n\n"
+                f"{E_H} H: <b>${h_val}</b> | {h_tom} تومان\n"
+                f"{E_L} L: <b>${l_val}</b> | {l_tom} تومان\n"
+                f"{E_VOL} Vol: <b>{vol_val} USDT</b>\n"
+                f"{E_USDT} USDT: <b>{usdt_val} تومان</b>\n"
             )
         else:
             caption = (
                 f"{coin_emoji} <b>{data['symbol']}</b>\n"
-                f"{E_P} P: {p_val}\n"
-                f"{E_24H} 24h: {change_str}%\n\n"
-                f"{E_H} H: ${h_val}\n"
-                f"{E_L} L: ${l_val}\n"
-                f"{E_VOL} Vol: {vol_val} USDT\n"
-                f"{E_USDT} USDT: در دسترس نیست\n"
+                f"{E_P} P: <b>{p_val}</b>\n"
+                f"{E_24H} 24h: <b>{change_str}%</b>\n\n"
+                f"{E_H} H: <b>${h_val}</b>\n"
+                f"{E_L} L: <b>${l_val}</b>\n"
+                f"{E_VOL} Vol: <b>{vol_val} USDT</b>\n"
+                f"{E_USDT} USDT: <b>در دسترس نیست</b>\n"
             )
 
     except Exception as e:
