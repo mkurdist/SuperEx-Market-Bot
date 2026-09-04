@@ -459,7 +459,7 @@ async def handle_ticker_input(message: types.Message):
             
             caption = (
                 f"{coin_emoji} <b>{data['symbol']}</b>\n"
-                f"{E_P} P: {p_val} ≈ <b>{p_tom} تومان</b>\n"
+                f"{E_P} P: <b>{p_val}</b> ≈ <b>{p_tom} تومان</b>\n"
                 f"{E_24H} 24h: <b>{change_str}%</b>\n\n"
                 f"{E_H} H: <b>${h_val}</b> | {h_tom} تومان\n"
                 f"{E_L} L: <b>${l_val}</b> | {l_tom} تومان\n"
@@ -476,7 +476,6 @@ async def handle_ticker_input(message: types.Message):
                 f"{E_VOL} Vol: <b>{vol_val} USDT</b>\n"
                 f"{E_USDT} USDT: <b>در دسترس نیست</b>\n"
             )
-
     except Exception as e:
         logging.error(f"Error formatting caption: {e}")
         caption = f"{CRYPTO_EMOJIS.get(symbol, '🪙')} <b>{symbol}</b>\nError formatting data."
