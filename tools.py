@@ -233,7 +233,7 @@ def _render_world_gold_chart_sync(points) -> bytes:
     fig.autofmt_xdate(rotation=0)
 
     ax.text(
-        0.5, 0.03, "Credit by SuperEx",
+        0.5, 0.03, "created by @SuperExPrice_bot | @SuperexIR",
         transform=ax.transAxes, ha="center", va="bottom",
         fontsize=9, color="#9a9a9a",
     )
