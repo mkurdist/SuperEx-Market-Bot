@@ -95,13 +95,29 @@ def format_number(value: Any, decimals: int = 2) -> str:
         return "N/A"
     return f"{val:,.{decimals}f}"
 
+# تابع جدید برای تبدیل اعداد بزرگ به معادل فارسی (هزار، میلیون، میلیارد)
+def get_persian_abbrev(val: float) -> tuple[str, str]:
+    val = _clean_numeric(val)
+    if val is None:
+        return "N/A", ""
+    if val >= 1_000_000_000:
+        s = f"{val / 1_000_000_000:.2f}"
+        return s.rstrip('0').rstrip('.') if '.' in s else s, " میلیارد"
+    elif val >= 1_000_000:
+        s = f"{val / 1_000_000:.2f}"
+        return s.rstrip('0').rstrip('.') if '.' in s else s, " میلیون"
+    elif val >= 1_000:
+        s = f"{val / 1_000:.2f}"
+        return s.rstrip('0').rstrip('.') if '.' in s else s, " هزار"
+    else:
+        return f"{val:,.0f}", ""
+
 FOOTER = "\n<i>@SuperExFa_bot</i>"
 
 # ===========================================================
 # Helper Functions: Smart Triggers & Logic
 # ===========================================================
 def normalize_text(text: str) -> str:
-    """اعداد را انگلیسی می‌کند، علائم نگارشی را حذف کرده و متن را کوچک می‌کند."""
     if not text:
         return ""
     text = text.translate(_DIGIT_TRANS)
@@ -109,13 +125,11 @@ def normalize_text(text: str) -> str:
     return text.strip().lower()
 
 def is_valid_keyword_trigger(message: types.Message, keywords: set) -> bool:
-    """بررسی می‌کند پیام ریپلای نباشد و دقیقاً با یکی از کلمات کلیدی برابر باشد."""
     if message.reply_to_message is not None:
-        return False  # عدم واکنش به پیام‌های ریپلای شده
+        return False
     return normalize_text(message.text) in keywords
 
 def is_valid_calc_trigger(message: types.Message, regex_pattern: re.Pattern) -> bool:
-    """بررسی می‌کند پیام ریپلای نباشد و الگوی ماشین‌حساب در آن صدق کند."""
     if message.reply_to_message is not None:
         return False
     return bool(regex_pattern.match(normalize_text(message.text)))
@@ -307,7 +321,6 @@ async def handle_dollar_price(message: types.Message):
     if tgju_dollar is None and not sources:
         return  # Silent Fail
 
-    # استفاده از ایموجی کاستوم در هدر کارت قیمت
     lines = [f"{USDT_EMOJI} <b>نرخ لحظه‌ای دلار و تتر</b>\n"]
     if tgju_dollar is not None: lines.append(f"🏦 دلار بازار آزاد: <b>{toman_str(tgju_dollar)}</b> تومان\n")
 
@@ -315,7 +328,6 @@ async def handle_dollar_price(message: types.Message):
         avg_price = sum(_clean_numeric(s["price_toman"]) for s in sources) / len(sources)
         changes = [c for c in [_clean_numeric(s.get("change")) for s in sources] if c is not None]
         avg_change_str = _format_change(sum(changes) / len(changes)) if changes else ""
-        # استفاده از ایموجی کاستوم برای میانگین قیمت
         lines.append(f"{USDT_EMOJI} میانگین قیمت تتر: <b>{toman_str(avg_price)}</b> تومان{avg_change_str}")
     else:
         lines.append(f"{USDT_EMOJI} میانگین قیمت تتر: <i>در دسترس نیست</i>")
@@ -328,7 +340,6 @@ async def handle_dollar_price(message: types.Message):
 # 3) Calculators (Gold & Dollar/Crypto)
 # ===========================================================
 
-# Regexes for Exact Matching of Calculator patterns
 GOLD_CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:گرم\s*)?(طلا|سکه|آبشده|ابشده)\s*$")
 DOLLAR_CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(دلار|تتر|usdt|dollar)\s*$")
 CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-z]{2,10})\s*$")
@@ -358,12 +369,13 @@ async def handle_gold_gram_calculator(message: types.Message):
 
     price_per_gram_toman = geram18_val / 10
     total_toman = grams * price_per_gram_toman
+    
+    total_num, total_suffix = get_persian_abbrev(total_toman)
 
-    # سرتیتر حذف شد
     lines = [
         f"وزن: <b>{format_number(grams, 2)}</b> گرم (طلای ۱۸ عیار)",
         f"قیمت هر گرم: <b>{toman_str(price_per_gram_toman)}</b> تومان",
-        f"\n💰 مجموع: <b>{toman_str(total_toman)}</b> تومان",
+        f"\n💰 مجموع: <b>{total_num}</b>{total_suffix} تومان",
         FOOTER,
     ]
     await message.reply("\n".join(lines), parse_mode="HTML")
@@ -377,11 +389,9 @@ async def handle_dollar_calculator(message: types.Message):
     except ValueError: return
     if amount <= 0: return
 
-    currency_name = "دلار / تتر"
+    currency_name = "USDT / دلار"
     if "usdt" in match.group(2) or "تتر" in match.group(2):
-        currency_name = "تتر"
-    elif "دلار" in match.group(2) or "dollar" in match.group(2):
-        currency_name = "دلار"
+        currency_name = "USDT / دلار"
 
     toman_rate = await get_avg_usdt_toman_rate()
     if not toman_rate:
@@ -389,11 +399,20 @@ async def handle_dollar_calculator(message: types.Message):
 
     total_toman = amount * toman_rate
     
-    # سرتیتر حذف شد
+    # ایموجی‌های دقیق ارسالی
+    E_HEADER = "<tg-emoji emoji-id='5402186569006210455'>🔄</tg-emoji>"
+    E_USD = "<tg-emoji emoji-id='5197434882321567830'>💲</tg-emoji>"
+    E_TOMAN = "<tg-emoji emoji-id='5472030678633684592'>💸</tg-emoji>"
+    
+    # برداشتن ممیزها برای اعداد صحیح (مثلا 10 به جای 10.00)
+    amount_str = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.2f}".rstrip('0').rstrip('.')
+    total_num, total_suffix = get_persian_abbrev(total_toman)
+    
     lines = [
-        f"مقدار: <b>{format_number(amount, 2)}</b> {currency_name}",
-        f"قیمت واحد: <b>{toman_str(toman_rate)}</b> تومان",
-        f"\n{USDT_EMOJI} معادل تومانی: <b>{toman_str(total_toman)}</b> تومان",
+        f"{E_HEADER} <b>تبدیل دلار به تومان</b>\n",
+        f"{E_USD} مقدار : <code>{amount_str}</code> {currency_name}",
+        f"{E_USD} قیمت تتر : <code>{toman_str(toman_rate)}</code> تومان",
+        f"{E_TOMAN} معادل تومان : <code>{total_num}</code>{total_suffix} تومان",
         FOOTER,
     ]
     await message.reply("\n".join(lines), parse_mode="HTML")
@@ -448,7 +467,6 @@ async def handle_crypto_calculator(message: types.Message):
     usd_value = amount * price_usd
     amount_decimals = 8 if amount < 1 else 4
 
-    # سرتیتر حذف شد
     lines = [
         f"مقدار: <b>{format_number(amount, amount_decimals)}</b> {symbol}",
         f"قیمت واحد: <b>${format_number(price_usd, 4)}</b>",
@@ -456,9 +474,11 @@ async def handle_crypto_calculator(message: types.Message):
 
     if toman_rate:
         toman_value = usd_value * toman_rate
+        total_num, total_suffix = get_persian_abbrev(toman_value)
+        
         lines.append(f"نرخ مبنای تتر: <b>{toman_str(toman_rate)}</b> تومان")
         lines.append(f"\n💵 مجموع دلاری: <b>${format_number(usd_value, 2)}</b>")
-        lines.append(f"💰 مجموع تومانی: <b>{toman_str(toman_value)}</b> تومان")
+        lines.append(f"💰 مجموع تومانی: <b>{total_num}</b>{total_suffix} تومان")
     else:
         lines.append(f"\n💵 مجموع دلاری: <b>${format_number(usd_value, 2)}</b>")
         lines.append("💰 مجموع تومانی: <i>در دسترس نیست</i>")
