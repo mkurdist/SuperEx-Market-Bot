@@ -23,8 +23,6 @@ from dotenv import load_dotenv
 
 # ---------------------------------------------------------
 # ماژول ایزوله ۳ قابلیت جدید (طلا/سکه، دلار/تتر، ماشین‌حساب کریپتو)
-# تمام منطق این ۳ قابلیت داخل tools.py است و از طریق یک روتر واحد
-# (tools_router) به دیسپچر متصل می‌شود - بدون هیچ دخالتی در بخش‌های زیر.
 # ---------------------------------------------------------
 from tools import tools_router
 
@@ -40,6 +38,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# نشست مشترک برای سرعت بخشیدن به ریکوئست‌های API
+shared_session: aiohttp.ClientSession = None
+
 TIMEFRAME_MAP = {
     "1m": "1m",
     "15m": "15m",
@@ -54,7 +55,7 @@ CRYPTO_EMOJIS = {
     "TON": "<tg-emoji emoji-id='5204021979174157518'>💎</tg-emoji>",
     "USDT": "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>",
     "USDC": "<tg-emoji emoji-id='5204298115506517373'>💵</tg-emoji>",
-    "BTC": "<tg-emoji emoji-id='5206210561364210906'>🪙</tg-emoji>", # اصلاح شد (متن متنی حذف و ایموجی واقعی جایگزین شد)
+    "BTC": "<tg-emoji emoji-id='5206210561364210906'>🪙</tg-emoji>", 
     "ETH": "<tg-emoji emoji-id='5206384773827670642'>🔷</tg-emoji>",
     "SOL": "<tg-emoji emoji-id='5206338061763362251'>🟣</tg-emoji>",
     "TRX": "<tg-emoji emoji-id='5206292569469760905'>🔴</tg-emoji>",
@@ -68,7 +69,7 @@ CRYPTO_EMOJIS = {
     "LTC": "<tg-emoji emoji-id='5208615064445139636'>🥈</tg-emoji>",
     "SHIB": "<tg-emoji emoji-id='5206558148772511929'>🐶</tg-emoji>",
     "STETH": "<tg-emoji emoji-id='5226934633265904016'>💧</tg-emoji>",
-    "WBTC": "<tg-emoji emoji-id='5224186386772411289'>🪙</tg-emoji>", # اصلاح شد
+    "WBTC": "<tg-emoji emoji-id='5224186386772411289'>🪙</tg-emoji>",
     "BCH": "<tg-emoji emoji-id='5226956374390355937'>🟩</tg-emoji>",
     "LINK": "<tg-emoji emoji-id='5226844752485297224'>🔗</tg-emoji>",
     "TUSD": "<tg-emoji emoji-id='5224659155297518214'>💵</tg-emoji>",
@@ -80,7 +81,7 @@ CRYPTO_EMOJIS = {
     "OKB": "<tg-emoji emoji-id='5224475648524826880'>⬛</tg-emoji>",
     "FIL": "<tg-emoji emoji-id='5224599712950139709'>🗄</tg-emoji>",
     "ETC": "<tg-emoji emoji-id='5224345794483599984'>☘️</tg-emoji>",
-    "HBAR": "<tg-emoji emoji-id='5224436285149560605'>🪙</tg-emoji>", # اصلاح شد
+    "HBAR": "<tg-emoji emoji-id='5224436285149560605'>🪙</tg-emoji>",
     "ATOM": "<tg-emoji emoji-id='5226961305012811929'>⚛️</tg-emoji>"
 }
 
@@ -94,10 +95,10 @@ CHART_RENDER_EXECUTOR = ThreadPoolExecutor(
 
 CHART_RENDER_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_CHARTS", "4")))
 
-CHART_CACHE_TTL = 5  
+CHART_CACHE_TTL = 30  # افزایش کش چارت به ۳۰ ثانیه برای پایداری در گروه‌ها
 CHART_CACHE: dict = {}
 
-PRICE_CACHE_TTL = 3  
+PRICE_CACHE_TTL = 10  # افزایش کش قیمت به ۱۰ ثانیه
 PRICE_CACHE: dict = {}
 
 _CACHE_MAX_ENTRIES = 300  
@@ -155,7 +156,7 @@ class ChartCallback(CallbackData, prefix="chart"):
     timeframe: str
 
 # ---------------------------------------------------------
-# API Helper Functions
+# API Helper Functions (Using Global Session)
 # ---------------------------------------------------------
 def get_superex_headers() -> dict:
     return {
@@ -172,37 +173,35 @@ async def fetch_price_data(symbol: str) -> dict:
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     url = f"https://api.superexchang.com/resource/v3/public/currency/new?currency={base_symbol}"
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=get_superex_headers()) as response:
-                if response.status == 200:
-                    res_data = await response.json()
-                    data_obj = res_data.get("data", {})
+    try:
+        async with shared_session.get(url, headers=get_superex_headers(), timeout=5.0) as response:
+            if response.status == 200:
+                res_data = await response.json()
+                data_obj = res_data.get("data", {})
+                
+                if data_obj and data_obj.get("newPrice"):
+                    price = float(data_obj.get("newPrice", "0.0"))
+                    sum_number = float(data_obj.get("sumNumber", "0.0"))
                     
-                    if data_obj and data_obj.get("newPrice"):
-                        price = float(data_obj.get("newPrice", "0.0"))
-                        sum_number = float(data_obj.get("sumNumber", "0.0"))
-                        
-                        volume_usdt = price * sum_number
-                        
-                        if volume_usdt >= 1000:
-                            formatted_vol = f"{volume_usdt:,.2f}"
-                        else:
-                            formatted_vol = f"{volume_usdt:.4f}"
+                    volume_usdt = price * sum_number
+                    
+                    if volume_usdt >= 1000:
+                        formatted_vol = f"{volume_usdt:,.2f}"
+                    else:
+                        formatted_vol = f"{volume_usdt:.4f}"
 
-                        return {
-                            "symbol": base_symbol.upper(),
-                            "price": str(data_obj.get("newPrice", "0.0")),
-                            "change_24h": str(data_obj.get("change", "0.0")),
-                            "high": str(data_obj.get("maxPrice", "0.0")),
-                            "low": str(data_obj.get("minPrice", "0.0")),
-                            "volume": formatted_vol,
-                            "source": "SuperEx"
-                        }
-        except Exception as e:
-            logging.error(f"Error fetching ticker for {symbol}: {e}")
+                    return {
+                        "symbol": base_symbol.upper(),
+                        "price": str(data_obj.get("newPrice", "0.0")),
+                        "change_24h": str(data_obj.get("change", "0.0")),
+                        "high": str(data_obj.get("maxPrice", "0.0")),
+                        "low": str(data_obj.get("minPrice", "0.0")),
+                        "volume": formatted_vol,
+                        "source": "SuperEx"
+                    }
+    except Exception as e:
+        logging.error(f"Error fetching ticker for {symbol}: {e}")
             
-    logging.warning(f"Symbol {symbol} not found on SuperEx.")
     return {"error": "Symbol not found on SuperEx."}
 
 async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
@@ -213,24 +212,23 @@ async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit=60"
     
     parsed_data = []
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, timeout=5.0) as response:
-                if response.status == 200:
-                    items = await response.json()
-                    if isinstance(items, list) and items:
-                        for item in items:
-                            t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
-                            parsed_data.append({
-                                "Date": pd.to_datetime(int(t), unit="ms"),
-                                "Open": float(o),
-                                "High": float(h),
-                                "Low": float(l),
-                                "Close": float(c),
-                                "Volume": float(v)
-                            })
-        except Exception as e:
-            logging.error(f"Binance Kline error for {symbol}: {e}")
+    try:
+        async with shared_session.get(url, timeout=5.0) as response:
+            if response.status == 200:
+                items = await response.json()
+                if isinstance(items, list) and items:
+                    for item in items:
+                        t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
+                        parsed_data.append({
+                            "Date": pd.to_datetime(int(t), unit="ms"),
+                            "Open": float(o),
+                            "High": float(h),
+                            "Low": float(l),
+                            "Close": float(c),
+                            "Volume": float(v)
+                        })
+    except Exception as e:
+        logging.error(f"Binance Kline error for {symbol}: {e}")
             
     return parsed_data
 
@@ -239,34 +237,33 @@ async def fetch_coingecko_market_chart(symbol: str) -> list:
     search_url = f"https://api.coingecko.com/api/v3/search?query={base_symbol}"
     
     parsed_data = []
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(search_url, timeout=5.0) as resp:
-                if resp.status == 200:
-                    search_data = await resp.json()
-                    coins = search_data.get("coins", [])
-                    if coins:
-                        coin_id = coins[0].get("id")
-                        chart_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=1"
-                        async with session.get(chart_url, timeout=5.0) as chart_resp:
-                            if chart_resp.status == 200:
-                                chart_data = await chart_resp.json()
-                                prices = chart_data.get("prices", [])
-                                volumes = chart_data.get("total_volumes", [])
-                                
-                                for i, p_item in enumerate(prices):
-                                    t, price = p_item[0], p_item[1]
-                                    vol = volumes[i][1] if i < len(volumes) else 0.0
-                                    parsed_data.append({
-                                        "Date": pd.to_datetime(int(t), unit="ms"),
-                                        "Open": float(price),
-                                        "High": float(price),
-                                        "Low": float(price),
-                                        "Close": float(price),
-                                        "Volume": float(vol)
-                                    })
-        except Exception as e:
-            logging.error(f"CoinGecko fallback error for {symbol}: {e}")
+    try:
+        async with shared_session.get(search_url, timeout=5.0) as resp:
+            if resp.status == 200:
+                search_data = await resp.json()
+                coins = search_data.get("coins", [])
+                if coins:
+                    coin_id = coins[0].get("id")
+                    chart_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=1"
+                    async with shared_session.get(chart_url, timeout=5.0) as chart_resp:
+                        if chart_resp.status == 200:
+                            chart_data = await chart_resp.json()
+                            prices = chart_data.get("prices", [])
+                            volumes = chart_data.get("total_volumes", [])
+                            
+                            for i, p_item in enumerate(prices):
+                                t, price = p_item[0], p_item[1]
+                                vol = volumes[i][1] if i < len(volumes) else 0.0
+                                parsed_data.append({
+                                    "Date": pd.to_datetime(int(t), unit="ms"),
+                                    "Open": float(price),
+                                    "High": float(price),
+                                    "Low": float(price),
+                                    "Close": float(price),
+                                    "Volume": float(vol)
+                                })
+    except Exception as e:
+        logging.error(f"CoinGecko fallback error for {symbol}: {e}")
             
     return parsed_data
 
@@ -315,8 +312,8 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     ax = axlist[0]
     ax.set_title(ax.get_title(), pad=10, fontsize=13, color='#e6e6e6')
 
-    # تغییر واترمارک به متن درخواستی
-    watermark_text = "created by @SuperExPrice_bot | @SuperexIR"
+    # تغییر واترمارک به متن درخواستی (بدون تغییر تنظیمات استایل)
+    watermark_text = "Credit by SuperEx"
     ax.text(
         0.5, 0.03, watermark_text,
         transform=ax.transAxes,
@@ -380,7 +377,7 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ---------------------------------------------------------
-# تشخیص هوشمند نماد کریپتو (Ticker Detection) - بازنویسی‌شده
+# تشخیص هوشمند نماد کریپتو (Ticker Detection)
 # ---------------------------------------------------------
 COMMON_WORDS_BLOCKLIST = {
     "hi", "hello", "hey", "yo", "sup", "ok", "okay", "yes", "no", "yep", "nope",
@@ -394,12 +391,14 @@ COMMON_WORDS_BLOCKLIST = {
     "gold", "dollar", "usdt", "tether",
 }
 
+# کامپایل شدن Regex برای افزایش شدید سرعت در گروه‌های شلوغ
+TICKER_REGEX = re.compile(r"^[a-zA-Z]{2,10}$")
 
 def is_valid_ticker_symbol(text: str) -> bool:
     if not text:
         return False
     cleaned = text.strip()
-    if not re.match(r"^[a-zA-Z]{2,10}$", cleaned):
+    if not TICKER_REGEX.match(cleaned):
         return False
     if cleaned.lower() in COMMON_WORDS_BLOCKLIST:
         return False
@@ -408,7 +407,6 @@ def is_valid_ticker_symbol(text: str) -> bool:
 # ---------------------------------------------------------
 # Message Handlers
 # ---------------------------------------------------------
-
 @dp.message(CommandStart())
 async def send_welcome_and_tutorials(message: types.Message):
     """
@@ -438,51 +436,11 @@ async def send_welcome_and_tutorials(message: types.Message):
     
     await message.reply(welcome_text, parse_mode="HTML", disable_web_page_preview=True)
 
-@dp.message(F.text == "/test_emojis")
-async def show_all_emojis(message: types.Message):
-    unknown_ids = [
-        "5321041614443944130", "5319019251783212762", "5204021979174157518",
-        "5204367105566193797", "5203973501878286332", "5203921507004201718",
-        "5204298115506517373", "5203997304587040556", "5206210561364210906",
-        "5204177620199027192", "5206384773827670642", "5204021042871286051",
-        "5206338061763362251", "5204004198009551074", "5206292569469760905",
-        "5204344763146320501", "5204418030993422385", "5204329022091180922",
-        "5204173131958204067", "5204241323153961416"
-    ]
-    
-    text = "🔍 <b>لیست تشخیص ایموجی‌ها:</b>\n\n"
-    for i, eid in enumerate(unknown_ids, 1):
-        text += f"{i}. <tg-emoji emoji-id='{eid}'>🪙</tg-emoji> ➔ <code>{eid}</code>\n"
-    await message.reply(text, parse_mode="HTML")
-
-@dp.message(F.entities | F.caption_entities)
-async def extract_custom_emoji(message: types.Message):
-    entities = message.caption_entities if message.photo or message.document else message.entities
-    full_text = message.caption if message.photo or message.document else message.text
-    found_emojis = []
-    
-    if entities and full_text:
-        for entity in entities:
-            if entity.type == "custom_emoji":
-                emoji_char = full_text[entity.offset : entity.offset + entity.length]
-                entry = f"ایموجی: {emoji_char} ➔ آیدی: <code>{entity.custom_emoji_id}</code>"
-                if entry not in found_emojis:
-                    found_emojis.append(entry)
-            
-    if found_emojis:
-        response_text = "✨ <b>ایموجی‌های یافت شده در این پیام:</b>\n\n" + "\n\n".join(found_emojis)
-        await message.reply(response_text, parse_mode="HTML")
-        return
-        
-    text = message.text.strip() if message.text else ""
-    if is_valid_ticker_symbol(text):
-        await handle_ticker_input(message)
 
 # فیلتر هوشمند: فقط نمادهای کریپتوی معتبر
 @dp.message(lambda message: is_valid_ticker_symbol(message.text or ""))
 async def handle_ticker_input(message: types.Message):
     symbol = message.text.strip().upper()
-    processing_msg = await message.reply("⏳ Fetching data...")
 
     price_task = asyncio.create_task(get_price_data_cached(symbol))
     chart_task = asyncio.create_task(generate_chart_image(symbol, "1h"))
@@ -491,19 +449,11 @@ async def handle_ticker_input(message: types.Message):
 
     if "error" in data:
         chart_task.cancel()
-        if message.chat.type == "private":
-            await processing_msg.edit_text("❌ Symbol not found on SuperEx.")
-        else:
-            try:
-                await processing_msg.delete()
-            except Exception:
-                pass
-        return
+        return  # سکوت مطلق: اگر ارز پیدا نشد بدون هیچ پیامی خارج می‌شود
 
     # خواندن ایموجی کاستوم از دیکشنری (اگر نبود از ایموجی ساده 🪙 استفاده می‌کند)
     coin_emoji = CRYPTO_EMOJIS.get(data['symbol'], "🪙")
 
-    # تغییر فرمت متن از Markdown به HTML برای اجرای تگ‌های ایموجی کاستوم
     caption = (
         f"{coin_emoji} <b>{data['symbol']}</b>\n"
         f"💰 <b>P:</b> ${data['price']}\n"
@@ -523,11 +473,9 @@ async def handle_ticker_input(message: types.Message):
             parse_mode="HTML",
             reply_markup=get_price_keyboard(symbol)
         )
-        await processing_msg.delete()
     except Exception as e:
         logging.error(f"Chart generation error: {e}")
         await message.reply(caption + "\n\n<i>(Chart unavailable)</i>", parse_mode="HTML")
-        await processing_msg.delete()
 
 @dp.callback_query(ChartCallback.filter())
 async def process_chart_timeframe(query: types.CallbackQuery, callback_data: ChartCallback):
@@ -564,6 +512,10 @@ async def health_check(request):
     return web.Response(text="SuperEx Bot is Running smoothly!")
 
 async def main():
+    global shared_session
+    # ایجاد یک Session دائمی و مشترک برای دریافت سریع دیتا
+    shared_session = aiohttp.ClientSession()
+    
     app = web.Application()
     app.router.add_get('/', health_check)
     
@@ -580,6 +532,7 @@ async def main():
     try:
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
+        await shared_session.close() # بستن امن Session هنگام خاموش شدن
         CHART_RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 if __name__ == "__main__":
