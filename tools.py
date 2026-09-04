@@ -131,7 +131,15 @@ def get_persian_abbrev(val: float) -> tuple[str, str]:
     else:
         return f"{val:,.0f}", ""
 
-FOOTER = "\n<a href='https://t.me/SuperexIR'>👥 عضویت در گروه فارسی SuperEx</a>\n<i>@SuperExFa_bot</i>"
+# تعریف ایموجی‌های فوتر
+E_CHANNEL_ICON = "<tg-emoji emoji-id='5244940072473599757'>⭐</tg-emoji>"
+E_GROUP_ICON = "<tg-emoji emoji-id='5242463950813012253'>👥</tg-emoji>"
+
+FOOTER = (
+    f"\n{E_CHANNEL_ICON} <a href='https://t.me/SuperExNews_Iran'>کانال رسمی اخبار ایران</a>\n"
+    f"{E_GROUP_ICON} <a href='https://t.me/SuperexIR'>گروه گفتگو و پشتیبانی</a>\n"
+    f"<i>@SuperExFa_bot</i>"
+)
 
 def normalize_text(text: str) -> str:
     if not text:
