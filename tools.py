@@ -131,7 +131,7 @@ def get_persian_abbrev(val: float) -> tuple[str, str]:
     else:
         return f"{val:,.0f}", ""
 
-FOOTER = "\n<i>@SuperExFa_bot</i>"
+FOOTER = "\n<a href='https://t.me/SuperexIR'>👥 عضویت در گروه فارسی SuperEx</a>\n<i>@SuperExFa_bot</i>"
 
 def normalize_text(text: str) -> str:
     if not text:
