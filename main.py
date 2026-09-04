@@ -21,7 +21,7 @@ from aiogram.filters import CommandStart
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------
-# ماژول ایزوله ۳ قابلیت جدید (طلا/سکه، دلار/تتر، ماشین‌حساب کریپتو)
+# ماژول ایزوله ۳ قابلیت جدید
 # ---------------------------------------------------------
 from tools import tools_router
 
@@ -37,10 +37,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# نشست مشترک برای سرعت بخشیدن به ریکوئست‌های API
 shared_session: aiohttp.ClientSession = None
-
-# متغیر سراسری برای ذخیره نرخ تتر (آپدیت در پس‌زمینه)
 USDT_TOMAN_RATE = None
 
 TIMEFRAME_MAP = {
@@ -51,7 +48,6 @@ TIMEFRAME_MAP = {
     "1d": "1d"
 }
 
-# دیکشنری اختصاصی ایموجی‌های کاستوم تلگرام برای ارزهای دیجیتال
 CRYPTO_EMOJIS = {
     "GRAM": "<tg-emoji emoji-id='5321041614443944130'>💎</tg-emoji>",
     "TON": "<tg-emoji emoji-id='5204021979174157518'>💎</tg-emoji>",
@@ -88,6 +84,26 @@ CRYPTO_EMOJIS = {
 }
 
 # ---------------------------------------------------------
+# Formatting Helpers (برای خلاصه کردن اعداد)
+# ---------------------------------------------------------
+def format_abbrev(val: float) -> str:
+    if val >= 1_000_000_000:
+        return f"{val/1_000_000_000:.2f}B"
+    if val >= 1_000_000:
+        return f"{val/1_000_000:.2f}M"
+    if val >= 1_000:
+        return f"{val/1_000:.2f}K"
+    s = f"{val:,.2f}"
+    return s.rstrip('0').rstrip('.') if '.' in s else s
+
+def format_comma(val: float) -> str:
+    if val < 1: 
+        s = f"{val:,.6f}"
+    else:
+        s = f"{val:,.2f}"
+    return s.rstrip('0').rstrip('.') if '.' in s else s
+
+# ---------------------------------------------------------
 # Performance: Chart rendering pool + caches
 # ---------------------------------------------------------
 CHART_RENDER_EXECUTOR = ThreadPoolExecutor(
@@ -105,13 +121,11 @@ PRICE_CACHE: dict = {}
 
 _CACHE_MAX_ENTRIES = 300  
 
-
 def _cache_get(store: dict, key, ttl: float):
     entry = store.get(key)
     if entry and (time.time() - entry[0]) < ttl:
         return entry[1]
     return None
-
 
 def _cache_set(store: dict, key, value):
     store[key] = (time.time(), value)
@@ -119,34 +133,18 @@ def _cache_set(store: dict, key, value):
         oldest_key = min(store, key=lambda k: store[k][0])
         store.pop(oldest_key, None)
 
-
 _MARKET_COLORS = mpf.make_marketcolors(
-    up='#00d964',      
-    down='#ff3b3b',    
-    edge='inherit',
-    wick='inherit',
-    volume='in',
-    ohlc='i'
+    up='#00d964', down='#ff3b3b', edge='inherit', wick='inherit', volume='in', ohlc='i'
 )
 
 CHART_STYLE = mpf.make_mpf_style(
-    marketcolors=_MARKET_COLORS,
-    base_mpf_style='binance',  
-    facecolor='#000000',   
-    edgecolor='#555555',   
-    figcolor='#000000',
-    gridcolor='#222222',   
-    gridstyle='--',
+    marketcolors=_MARKET_COLORS, base_mpf_style='binance', facecolor='#000000',   
+    edgecolor='#555555', figcolor='#000000', gridcolor='#222222', gridstyle='--',
     y_on_right=False,      
     rc={
-        'font.family': 'sans-serif',
-        'axes.titleweight': 'normal',   
-        'axes.titlesize': 13,
-        'axes.titlecolor': '#e6e6e6',
-        'axes.labelcolor': '#cfcfcf',   
-        'xtick.color': '#9a9a9a',
-        'ytick.color': '#9a9a9a',
-        'text.color': '#9a9a9a',        
+        'font.family': 'sans-serif', 'axes.titleweight': 'normal', 'axes.titlesize': 13,
+        'axes.titlecolor': '#e6e6e6', 'axes.labelcolor': '#cfcfcf', 'xtick.color': '#9a9a9a',
+        'ytick.color': '#9a9a9a', 'text.color': '#9a9a9a',        
     }
 )
 
@@ -178,50 +176,34 @@ async def fetch_wallex_usdt() -> float | None:
         async with shared_session.get(url, timeout=5.0) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                symbols = data.get("result", {}).get("symbols", {})
-                item = symbols.get("USDTTMN")
-                if item:
-                    return float(item.get("stats", {}).get("lastPrice"))
+                item = data.get("result", {}).get("symbols", {}).get("USDTTMN")
+                if item: return float(item.get("stats", {}).get("lastPrice"))
     except Exception as e:
         logging.error(f"Wallex fetch error: {e}")
     return None
 
 async def update_tether_rate_loop():
-    """تایمر پس‌زمینه برای آپدیت نرخ تتر هر ۲ دقیقه بدون ایجاد فشار روی سرور"""
     global USDT_TOMAN_RATE
     while True:
         try:
             bitpin_rate, wallex_rate = await asyncio.gather(
-                fetch_bitpin_usdt(),
-                fetch_wallex_usdt(),
-                return_exceptions=True
+                fetch_bitpin_usdt(), fetch_wallex_usdt(), return_exceptions=True
             )
-            
-            valid_rates = []
-            if isinstance(bitpin_rate, float): valid_rates.append(bitpin_rate)
-            if isinstance(wallex_rate, float): valid_rates.append(wallex_rate)
-            
+            valid_rates = [r for r in (bitpin_rate, wallex_rate) if isinstance(r, float)]
             if valid_rates:
                 USDT_TOMAN_RATE = sum(valid_rates) / len(valid_rates)
-                logging.info(f"🔄 USDT/IRT Rate Updated in Background: {USDT_TOMAN_RATE}")
-                
         except Exception as e:
             logging.error(f"Error in update_tether_rate_loop: {e}")
-        
-        await asyncio.sleep(120)  # صبر برای 2 دقیقه
+        await asyncio.sleep(120)
 
 # ---------------------------------------------------------
 # API Helper Functions 
 # ---------------------------------------------------------
 def get_superex_headers() -> dict:
     return {
-        "accept": "*/*",
-        "accept-language": "en",
-        "client": "1",
-        "nonce": uuid.uuid4().hex,
-        "timestamp": str(int(time.time() * 1000)),
-        "token": "",
-        "content-type": "application/x-www-form-urlencoded"
+        "accept": "*/*", "accept-language": "en", "client": "1",
+        "nonce": uuid.uuid4().hex, "timestamp": str(int(time.time() * 1000)),
+        "token": "", "content-type": "application/x-www-form-urlencoded"
     }
 
 async def fetch_price_data(symbol: str) -> dict:
@@ -236,18 +218,10 @@ async def fetch_price_data(symbol: str) -> dict:
                 
                 if data_obj and data_obj.get("newPrice"):
                     price = float(data_obj.get("newPrice", "0.0"))
-                    
-                    # فیلتر هوشمند برای جلوگیری از چاپ ارزهای نامعتبر با قیمت صفر
-                    if price == 0.0:
-                        return {"error": "Symbol not found or invalid."}
+                    if price == 0.0: return {"error": "Symbol not found or invalid."}
                         
                     sum_number = float(data_obj.get("sumNumber", "0.0"))
                     volume_usdt = price * sum_number
-                    
-                    if volume_usdt >= 1000:
-                        formatted_vol = f"{volume_usdt:,.2f}"
-                    else:
-                        formatted_vol = f"{volume_usdt:.4f}"
 
                     return {
                         "symbol": base_symbol.upper(),
@@ -255,7 +229,7 @@ async def fetch_price_data(symbol: str) -> dict:
                         "change_24h": str(data_obj.get("change", "0.0")),
                         "high": str(data_obj.get("maxPrice", "0.0")),
                         "low": str(data_obj.get("minPrice", "0.0")),
-                        "volume": formatted_vol,
+                        "raw_volume": volume_usdt, # دیتای خام برای قالب‌بندی با M و B
                         "source": "SuperEx"
                     }
     except Exception as e:
@@ -266,7 +240,6 @@ async def fetch_price_data(symbol: str) -> dict:
 async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
     base_symbol = symbol.lower().replace("_usdt", "").replace("usdt", "")
     binance_symbol = f"{base_symbol.upper()}USDT"
-    
     interval = TIMEFRAME_MAP.get(timeframe, "1h")
     url = f"https://data-api.binance.vision/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit=60"
     
@@ -279,16 +252,11 @@ async def fetch_binance_kline(symbol: str, timeframe: str) -> list:
                     for item in items:
                         t, o, h, l, c, v = item[0], item[1], item[2], item[3], item[4], item[5]
                         parsed_data.append({
-                            "Date": pd.to_datetime(int(t), unit="ms"),
-                            "Open": float(o),
-                            "High": float(h),
-                            "Low": float(l),
-                            "Close": float(c),
-                            "Volume": float(v)
+                            "Date": pd.to_datetime(int(t), unit="ms"), "Open": float(o),
+                            "High": float(h), "Low": float(l), "Close": float(c), "Volume": float(v)
                         })
     except Exception as e:
         logging.error(f"Binance Kline error for {symbol}: {e}")
-            
     return parsed_data
 
 async def fetch_coingecko_market_chart(symbol: str) -> list:
@@ -307,89 +275,51 @@ async def fetch_coingecko_market_chart(symbol: str) -> list:
                     async with shared_session.get(chart_url, timeout=5.0) as chart_resp:
                         if chart_resp.status == 200:
                             chart_data = await chart_resp.json()
-                            prices = chart_data.get("prices", [])
-                            volumes = chart_data.get("total_volumes", [])
-                            
+                            prices, volumes = chart_data.get("prices", []), chart_data.get("total_volumes", [])
                             for i, p_item in enumerate(prices):
                                 t, price = p_item[0], p_item[1]
                                 vol = volumes[i][1] if i < len(volumes) else 0.0
                                 parsed_data.append({
-                                    "Date": pd.to_datetime(int(t), unit="ms"),
-                                    "Open": float(price),
-                                    "High": float(price),
-                                    "Low": float(price),
-                                    "Close": float(price),
-                                    "Volume": float(vol)
+                                    "Date": pd.to_datetime(int(t), unit="ms"), "Open": float(price),
+                                    "High": float(price), "Low": float(price), "Close": float(price), "Volume": float(vol)
                                 })
     except Exception as e:
         logging.error(f"CoinGecko fallback error for {symbol}: {e}")
-            
     return parsed_data
 
 async def fetch_kline_with_fallback(symbol: str, timeframe: str) -> list:
     data = await fetch_binance_kline(symbol, timeframe)
-    if data:
-        return data
-        
-    logging.info(f"Binance failed for {symbol}, falling back to CoinGecko...")
+    if data: return data
     data = await fetch_coingecko_market_chart(symbol)
     return data
 
 async def get_price_data_cached(symbol: str) -> dict:
     cache_key = symbol.upper()
     cached = _cache_get(PRICE_CACHE, cache_key, PRICE_CACHE_TTL)
-    if cached is not None:
-        return cached
+    if cached is not None: return cached
 
     data = await fetch_price_data(symbol)
-    if "error" not in data:
-        _cache_set(PRICE_CACHE, cache_key, data)
+    if "error" not in data: _cache_set(PRICE_CACHE, cache_key, data)
     return data
 
 def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
-    if timeframe == "1d":
-        date_format = '%b'
-        x_rotation = 0
-    else:
-        date_format = '%H:%M'
-        x_rotation = 0
-
+    date_format = '%b' if timeframe == "1d" else '%H:%M'
     fig, axlist = mpf.plot(
-        df,
-        type='candle',
-        style=CHART_STYLE,
-        volume=False,
-        # آرگومان title حذف شد تا روی عنوان کنترل کامل داشته باشیم
-        ylabel='Price (USDT)',   
-        datetime_format=date_format,
-        xrotation=x_rotation,
-        tight_layout=True,
-        returnfig=True,
-        figsize=(10, 6)   
+        df, type='candle', style=CHART_STYLE, volume=False,
+        ylabel='Price (USDT)', datetime_format=date_format,
+        xrotation=0, tight_layout=True, returnfig=True, figsize=(10, 6)   
     )
-
     ax = axlist[0]
-    
-    # عنوان دقیقاً در مرکز و با ۱ پیکسل (pad=3) فاصله از خط کادر بالا تنظیم شد
     ax.set_title(f"{symbol.upper().replace('USDT', '')}/USDT | {timeframe}", pad=10, fontsize=13, color='#e6e6e6', ha='center')
-# ایجاد فضای خالی در سمت راست نمودار
+
     x_min, x_max = ax.get_xlim()
     ax.set_xlim(x_min, x_max + 2)
-    watermark_text = "created by @SuperEXPrice_bot | @SuperexIR"
-    ax.text(
-        0.5, 0.03, watermark_text,
-        transform=ax.transAxes,
-        ha='center', va='bottom', fontsize=9.5, color='#9a9a9a', fontweight='normal'
-    )
+
+    ax.text(0.5, 0.03, "created by @SuperEXPrice_bot | @SuperexIR", transform=ax.transAxes, ha='center', va='bottom', fontsize=9.5, color='#9a9a9a', fontweight='normal')
 
     buf = io.BytesIO()
     try:
-        # افزایش pad_inches به 0.3 برای ایجاد حاشیه (تنفس) بیشتر دور کل تصویر
-        fig.savefig(
-            buf, dpi=130,
-            bbox_inches='tight', pad_inches=0.3,
-            facecolor=fig.get_facecolor(), edgecolor='none'
-        )
+        fig.savefig(buf, dpi=130, bbox_inches='tight', pad_inches=0.3, facecolor=fig.get_facecolor(), edgecolor='none')
         return buf.getvalue()
     finally:
         buf.close()
@@ -398,13 +328,10 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     cache_key = (symbol.upper(), timeframe)
     cached = _cache_get(CHART_CACHE, cache_key, CHART_CACHE_TTL)
-    if cached is not None:
-        return cached
+    if cached is not None: return cached
 
     parsed_data = await fetch_kline_with_fallback(symbol, timeframe)
-    
-    if not parsed_data:
-        raise ValueError("No chart data available from any API provider.")
+    if not parsed_data: raise ValueError("No chart data available.")
 
     df = pd.DataFrame(parsed_data)
     df.set_index("Date", inplace=True)
@@ -412,9 +339,7 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
 
     async with CHART_RENDER_SEMAPHORE:
         loop = asyncio.get_running_loop()
-        image_bytes = await loop.run_in_executor(
-            CHART_RENDER_EXECUTOR, _render_chart_sync, df, symbol, timeframe
-        )
+        image_bytes = await loop.run_in_executor(CHART_RENDER_EXECUTOR, _render_chart_sync, df, symbol, timeframe)
 
     _cache_set(CHART_CACHE, cache_key, image_bytes)
     return image_bytes
@@ -440,7 +365,7 @@ def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ---------------------------------------------------------
-# تشخیص هوشمند نماد کریپتو (Ticker Detection)
+# تشخیص هوشمند نماد کریپتو
 # ---------------------------------------------------------
 COMMON_WORDS_BLOCKLIST = {
     "hi", "hello", "hey", "yo", "sup", "ok", "okay", "yes", "no", "yep", "nope",
@@ -450,20 +375,16 @@ COMMON_WORDS_BLOCKLIST = {
     "report", "spam", "ban", "kick", "mute", "bot", "bots",
     "buy", "sell", "sold", "pump", "dump", "moon", "scam", "fake", "real", "up", "down",
     "long", "short", "hold", "hodl", "new", "old", "price", "chart", "link", "join",
-    "group", "channel", "start", "stop",
-    "gold", "dollar", "usdt", "tether",
+    "group", "channel", "start", "stop", "gold", "dollar", "usdt", "tether",
 }
 
 TICKER_REGEX = re.compile(r"^[a-zA-Z]{2,10}$")
 
 def is_valid_ticker_symbol(text: str) -> bool:
-    if not text:
-        return False
+    if not text: return False
     cleaned = text.strip()
-    if not TICKER_REGEX.match(cleaned):
-        return False
-    if cleaned.lower() in COMMON_WORDS_BLOCKLIST:
-        return False
+    if not TICKER_REGEX.match(cleaned): return False
+    if cleaned.lower() in COMMON_WORDS_BLOCKLIST: return False
     return True
 
 # ---------------------------------------------------------
@@ -492,7 +413,6 @@ async def send_welcome_and_tutorials(message: types.Message):
         "━━━━━━━━━━━━━━━━━━\n"
         "💬 در صورت داشتن هرگونه سوال، به گروه پشتیبانی مراجعه کنید."
     )
-    
     await message.reply(welcome_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
@@ -509,35 +429,57 @@ async def handle_ticker_input(message: types.Message):
         chart_task.cancel()
         return  
 
-    coin_emoji = CRYPTO_EMOJIS.get(data['symbol'], "🪙")
-    
-    # ----------------------------------------------------
-    # محاسبه قیمت تومانی بر اساس نرخ کش شده پس‌زمینه
-    # ----------------------------------------------------
-    toman_line = ""
-    if USDT_TOMAN_RATE is not None and data.get('price'):
-        try:
-            usd_price = float(data['price'])
-            toman_price = usd_price * USDT_TOMAN_RATE
-            # فرمت‌دهی: اگر ارزش از 100 تومان بیشتر بود، بدون اعشار (با جداکننده) چاپ شود
-            if toman_price >= 100:
-                toman_formatted = f"{toman_price:,.0f}"
-            else:
-                toman_formatted = f"{toman_price:,.2f}"
-            
-            toman_line = f"🇮🇷 <b>Toman:</b> {toman_formatted} تومان\n"
-        except ValueError:
-            pass
+    try:
+        coin_emoji = CRYPTO_EMOJIS.get(data['symbol'], "🪙")
+        
+        price_float = float(data['price'])
+        high_float = float(data['high'])
+        low_float = float(data['low'])
+        vol_float = float(data.get('raw_volume', 0.0))
+        change_str = data['change_24h']
+        
+        p_val = format_comma(price_float)
+        h_val = format_comma(high_float)
+        l_val = format_comma(low_float)
+        vol_val = format_abbrev(vol_float)
+        
+        # آیدی‌های دقیق درخواستی شما
+        E_P = "<tg-emoji emoji-id='5375296873982604963'>💰</tg-emoji>"
+        E_24H = "<tg-emoji emoji-id='5246762912428603768'>📉</tg-emoji>"
+        E_H = "<tg-emoji emoji-id='5244837092042750681'>📈</tg-emoji>"
+        E_L = "<tg-emoji emoji-id='5429518319243775957'>📉</tg-emoji>"
+        E_VOL = "<tg-emoji emoji-id='5231200819986047254'>📊</tg-emoji>"
+        E_USDT = "<tg-emoji emoji-id='5197434882321567830'>💲</tg-emoji>"
 
-    caption = (
-        f"{coin_emoji} <b>{data['symbol']}</b>\n"
-        f"💰 <b>P:</b> ${data['price']}\n"
-        f"{toman_line}"
-        f"📉 <b>24h:</b> {data['change_24h']}%\n\n"
-        f"📈 <b>H:</b> ${data['high']}\n"
-        f"📉 <b>L:</b> ${data['low']}\n"
-        f"📊 <b>Vol:</b> {data['volume']} USDT\n"
-    )
+        if USDT_TOMAN_RATE:
+            p_tom = format_abbrev(price_float * USDT_TOMAN_RATE)
+            h_tom = format_abbrev(high_float * USDT_TOMAN_RATE)
+            l_tom = format_abbrev(low_float * USDT_TOMAN_RATE)
+            usdt_val = f"{int(USDT_TOMAN_RATE):,}"
+            
+            caption = (
+                f"{coin_emoji} <b>{data['symbol']}</b>\n"
+                f"{E_P} P: {p_val} ≈ {p_tom} تومان\n"
+                f"{E_24H} 24h: {change_str}%\n\n"
+                f"{E_H} H: ${h_val} | {h_tom} تومان\n"
+                f"{E_L} L: ${l_val} | {l_tom} تومان\n"
+                f"{E_VOL} Vol: {vol_val} USDT\n"
+                f"{E_USDT} USDT: {usdt_val} تومان\n"
+            )
+        else:
+            caption = (
+                f"{coin_emoji} <b>{data['symbol']}</b>\n"
+                f"{E_P} P: {p_val}\n"
+                f"{E_24H} 24h: {change_str}%\n\n"
+                f"{E_H} H: ${h_val}\n"
+                f"{E_L} L: ${l_val}\n"
+                f"{E_VOL} Vol: {vol_val} USDT\n"
+                f"{E_USDT} USDT: در دسترس نیست\n"
+            )
+
+    except Exception as e:
+        logging.error(f"Error formatting caption: {e}")
+        caption = f"{CRYPTO_EMOJIS.get(symbol, '🪙')} <b>{symbol}</b>\nError formatting data."
 
     try:
         chart_bytes = await chart_task
