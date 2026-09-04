@@ -359,8 +359,8 @@ async def handle_gold_gram_calculator(message: types.Message):
     price_per_gram_toman = geram18_val / 10
     total_toman = grams * price_per_gram_toman
 
+    # سرتیتر حذف شد
     lines = [
-        "🧮 <b>ماشین‌حساب طلا</b>\n",
         f"وزن: <b>{format_number(grams, 2)}</b> گرم (طلای ۱۸ عیار)",
         f"قیمت هر گرم: <b>{toman_str(price_per_gram_toman)}</b> تومان",
         f"\n💰 مجموع: <b>{toman_str(total_toman)}</b> تومان",
@@ -389,9 +389,8 @@ async def handle_dollar_calculator(message: types.Message):
 
     total_toman = amount * toman_rate
     
-    # استفاده از ایموجی کاستوم سه‌بعدی برای هدر و خط نتیجه ماشین‌حساب دلار
+    # سرتیتر حذف شد
     lines = [
-        f"{USDT_EMOJI} <b>تبدیل دلار به تومان</b>\n",
         f"مقدار: <b>{format_number(amount, 2)}</b> {currency_name}",
         f"قیمت واحد: <b>{toman_str(toman_rate)}</b> تومان",
         f"\n{USDT_EMOJI} معادل تومانی: <b>{toman_str(total_toman)}</b> تومان",
@@ -449,8 +448,8 @@ async def handle_crypto_calculator(message: types.Message):
     usd_value = amount * price_usd
     amount_decimals = 8 if amount < 1 else 4
 
+    # سرتیتر حذف شد
     lines = [
-        "🧮 <b>ماشین‌حساب کریپتو</b>\n",
         f"مقدار: <b>{format_number(amount, amount_decimals)}</b> {symbol}",
         f"قیمت واحد: <b>${format_number(price_usd, 4)}</b>",
     ]
