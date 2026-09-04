@@ -140,8 +140,47 @@ E_USD = "<tg-emoji emoji-id='5197434882321567830'>💲</tg-emoji>"
 E_TOMAN = "<tg-emoji emoji-id='5472030678633684592'>💸</tg-emoji>"
 E_TOTAL = "<tg-emoji emoji-id='5375296873982604963'>💰</tg-emoji>"
 E_HEADER_CONVERT = "<tg-emoji emoji-id='5402186569006210455'>🔄</tg-emoji>"
-E_COIN = "<tg-emoji emoji-id='5206210561364210906'>🪙</tg-emoji>"
 USDT_EMOJI = "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>"
+E_18K = "<tg-emoji emoji-id='5242306076405148889'>💰</tg-emoji>"
+E_OUNCE = "<tg-emoji emoji-id='5242751808111125319'>🌍</tg-emoji>"
+
+# ایموجی جایگزین برای ارزهایی که در لیست نیستند
+DEFAULT_CRYPTO_EMOJI = "<tg-emoji emoji-id='5242390476807479264'>🪙</tg-emoji>"
+
+CRYPTO_EMOJIS = {
+    "GRAM": "<tg-emoji emoji-id='5321041614443944130'>💎</tg-emoji>",
+    "TON": "<tg-emoji emoji-id='5204021979174157518'>💎</tg-emoji>",
+    "USDT": "<tg-emoji emoji-id='5203973501878286332'>💵</tg-emoji>",
+    "USDC": "<tg-emoji emoji-id='5204298115506517373'>💵</tg-emoji>",
+    "BTC": "<tg-emoji emoji-id='5206210561364210906'>🪙</tg-emoji>", 
+    "ETH": "<tg-emoji emoji-id='5206384773827670642'>🔷</tg-emoji>",
+    "SOL": "<tg-emoji emoji-id='5206338061763362251'>🟣</tg-emoji>",
+    "TRX": "<tg-emoji emoji-id='5206292569469760905'>🔴</tg-emoji>",
+    "BNB": "<tg-emoji emoji-id='5204418030993422385'>🟡</tg-emoji>",
+    "XRP": "<tg-emoji emoji-id='5204173131958204067'>✖️</tg-emoji>",
+    "DOGE": "<tg-emoji emoji-id='5204328287651770656'>🐕</tg-emoji>",
+    "ADA": "<tg-emoji emoji-id='5206635372284489921'>🔵</tg-emoji>",
+    "DAI": "<tg-emoji emoji-id='5208870606409317456'>🟡</tg-emoji>",
+    "DOT": "<tg-emoji emoji-id='5208683607828214797'>🩷</tg-emoji>",
+    "MATIC": "<tg-emoji emoji-id='5208848070715916390'>💜</tg-emoji>",
+    "LTC": "<tg-emoji emoji-id='5208615064445139636'>🥈</tg-emoji>",
+    "SHIB": "<tg-emoji emoji-id='5206558148772511929'>🐶</tg-emoji>",
+    "STETH": "<tg-emoji emoji-id='5226934633265904016'>💧</tg-emoji>",
+    "WBTC": "<tg-emoji emoji-id='5224186386772411289'>🪙</tg-emoji>",
+    "BCH": "<tg-emoji emoji-id='5226956374390355937'>🟩</tg-emoji>",
+    "LINK": "<tg-emoji emoji-id='5226844752485297224'>🔗</tg-emoji>",
+    "TUSD": "<tg-emoji emoji-id='5224659155297518214'>💵</tg-emoji>",
+    "LEO": "<tg-emoji emoji-id='5224681630861375987'>🦁</tg-emoji>",
+    "AVAX": "<tg-emoji emoji-id='5226653411692262875'>🔺</tg-emoji>",
+    "XLM": "<tg-emoji emoji-id='5224278943317638868'>🚀</tg-emoji>",
+    "XMR": "<tg-emoji emoji-id='5226686306846781788'>🕵️</tg-emoji>",
+    "UNI": "<tg-emoji emoji-id='5226480109761867804'>🦄</tg-emoji>",
+    "OKB": "<tg-emoji emoji-id='5224475648524826880'>⬛</tg-emoji>",
+    "FIL": "<tg-emoji emoji-id='5224599712950139709'>🗄</tg-emoji>",
+    "ETC": "<tg-emoji emoji-id='5224345794483599984'>☘️</tg-emoji>",
+    "HBAR": "<tg-emoji emoji-id='5224436285149560605'>🪙</tg-emoji>",
+    "ATOM": "<tg-emoji emoji-id='5226961305012811929'>⚛️</tg-emoji>"
+}
 
 
 # ===========================================================
@@ -260,9 +299,9 @@ async def handle_gold_price(message: types.Message):
 
     lines = ["🥇 <b>قیمت لحظه‌ای طلا</b>\n"]
     if geram18_val is not None: 
-        lines.append(f"{E_TOTAL} طلای ۱۸ عیار : <code>{geram18_val / 10:,.0f}</code> تومان")
+        lines.append(f"{E_18K} طلای ۱۸ عیار : <code>{geram18_val / 10:,.0f}</code> تومان")
     if ons_val is not None: 
-        lines.append(f"🌍 انس جهانی طلا : <code>{ons_val:,.2f}</code> دلار")
+        lines.append(f"{E_OUNCE} انس جهانی طلا : <code>{ons_val:,.2f}</code> دلار")
     
     lines.append(FOOTER)
     caption = "\n".join(lines)
@@ -386,7 +425,7 @@ async def handle_gold_gram_calculator(message: types.Message):
 
     lines = [
         f"⚖️ وزن : <code>{amount_str}</code> گرم (طلای ۱۸ عیار)",
-        f"{E_USD} قیمت هر گرم : <code>{toman_str(price_per_gram_toman)}</code> تومان",
+        f"{E_18K} قیمت هر گرم : <code>{toman_str(price_per_gram_toman)}</code> تومان",
         f"\n{E_TOMAN} مجموع : <code>{total_num}</code>{total_suffix} تومان",
         FOOTER,
     ]
@@ -475,8 +514,11 @@ async def handle_crypto_calculator(message: types.Message):
     
     amount_str = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.{amount_decimals}f}".rstrip('0').rstrip('.')
 
+    # دریافت ایموجی اختصاصی ارز (اگر نبود، ایموجی دیفالت استفاده می‌شود)
+    coin_emoji = CRYPTO_EMOJIS.get(symbol, DEFAULT_CRYPTO_EMOJI)
+
     lines = [
-        f"{E_COIN} مقدار : <code>{amount_str}</code> {symbol}",
+        f"{coin_emoji} مقدار : <code>{amount_str}</code> {symbol}",
         f"{E_USD} قیمت واحد : <code>${format_number(price_usd, 4)}</code>",
     ]
 
