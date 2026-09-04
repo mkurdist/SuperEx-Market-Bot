@@ -359,7 +359,7 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
         type='candle',
         style=CHART_STYLE,
         volume=False,
-        title=f"{symbol.upper().replace('USDT', '')}/USDT | {timeframe}",
+        # آرگومان title حذف شد تا روی عنوان کنترل کامل داشته باشیم
         ylabel='Price (USDT)',   
         datetime_format=date_format,
         xrotation=x_rotation,
@@ -369,7 +369,9 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
     )
 
     ax = axlist[0]
-    ax.set_title(ax.get_title(), pad=10, fontsize=13, color='#e6e6e6')
+    
+    # عنوان دقیقاً در مرکز و با ۱ پیکسل (pad=3) فاصله از خط کادر بالا تنظیم شد
+    ax.set_title(f"{symbol.upper().replace('USDT', '')}/USDT | {timeframe}", pad=3, fontsize=13, color='#e6e6e6', ha='center')
 
     watermark_text = "created by @SuperEXPrice_bot | @SuperexIR"
     ax.text(
@@ -380,7 +382,7 @@ def _render_chart_sync(df: pd.DataFrame, symbol: str, timeframe: str) -> bytes:
 
     buf = io.BytesIO()
     try:
-        # افزایش pad_inches به 0.3 برای ایجاد حاشیه (تنفس) بیشتر دور کادر نمودار
+        # افزایش pad_inches به 0.3 برای ایجاد حاشیه (تنفس) بیشتر دور کل تصویر
         fig.savefig(
             buf, dpi=130,
             bbox_inches='tight', pad_inches=0.3,
