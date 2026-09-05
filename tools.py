@@ -142,7 +142,6 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
     text = text.translate(_DIGIT_TRANS)
-    # رفع باگ اعشار: کاما حذف می‌شود، نقطه می‌ماند تا اعشار خراب نشود
     text = text.replace(',', '')
     text = re.sub(r'[؟?!،]', '', text)
     return text.strip(' .').lower()
@@ -362,6 +361,11 @@ async def handle_gold_price(message: types.Message):
 # ===========================================================
 DOLLAR_KEYWORDS = {"دلار", "تتر", "usdt", "dollar", "قیمت دلار", "قیمت تتر", "نرخ دلار"}
 
+# سیستم کش برای جلوگیری از لیمیت شدن ربات توسط صرافی‌های ایرانی
+_EXCHANGE_CACHE_TTL = 10.0
+_BITPIN_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+_WALLEX_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+
 async def fetch_tgju_dollar_toman() -> Optional[float]:
     data = await fetch_tgju_data()
     if not data: return None
@@ -371,6 +375,10 @@ async def fetch_tgju_dollar_toman() -> Optional[float]:
     return val / 10 if val else None
 
 async def fetch_bitpin_usdt() -> Optional[dict]:
+    now = time.time()
+    if _BITPIN_CACHE["data"] and (now - _BITPIN_CACHE["ts"]) < _EXCHANGE_CACHE_TTL:
+        return _BITPIN_CACHE["data"]
+    
     url = "https://api.bitpin.ir/v1/mkt/markets/"
     data = await _fetch_json(url)
     if not data: return None
@@ -379,18 +387,29 @@ async def fetch_bitpin_usdt() -> Optional[dict]:
         for m in markets:
             code = m.get("code") or f"{m.get('currency1')}_{m.get('currency2')}"
             if code == "USDT_IRT":
-                return {"price_toman": float(m.get("price")), "change": m.get("price_change_percent") or m.get("change")}
+                result = {"price_toman": float(m.get("price")), "change": m.get("price_change_percent") or m.get("change")}
+                _BITPIN_CACHE["data"] = result
+                _BITPIN_CACHE["ts"] = now
+                return result
     except Exception: pass
     return None
 
 async def fetch_wallex_usdt() -> Optional[dict]:
+    now = time.time()
+    if _WALLEX_CACHE["data"] and (now - _WALLEX_CACHE["ts"]) < _EXCHANGE_CACHE_TTL:
+        return _WALLEX_CACHE["data"]
+        
     url = "https://api.wallex.ir/v1/markets"
     data = await _fetch_json(url)
     if not data: return None
     try:
         symbols = data.get("result", {}).get("symbols", {})
         item = symbols.get("USDTTMN")
-        if item: return {"price_toman": float(item.get("stats", {}).get("lastPrice")), "change": item.get("stats", {}).get("dailyChangePercent") or item.get("stats", {}).get("24h_ch")}
+        if item: 
+            result = {"price_toman": float(item.get("stats", {}).get("lastPrice")), "change": item.get("stats", {}).get("dailyChangePercent") or item.get("stats", {}).get("24h_ch")}
+            _WALLEX_CACHE["data"] = result
+            _WALLEX_CACHE["ts"] = now
+            return result
     except Exception: pass
     return None
 
@@ -430,9 +449,10 @@ async def handle_dollar_price(message: types.Message):
 # 3) Calculators (Gold & Dollar/Crypto)
 # ===========================================================
 
-GOLD_CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:گرم\s*)?(طلا|سکه|آبشده|ابشده)\s*$")
-DOLLAR_CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(دلار|تتر|usdt|dollar)\s*$")
-CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-z]{2,10})\s*$")
+# رفع باگ نقطه‌ی سرگردان در ماشین‌حساب‌ها
+GOLD_CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d*)?)\s*(?:گرم\s*)?(طلا|سکه|آبشده|ابشده)\s*$")
+DOLLAR_CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d*)?)\s*(دلار|تتر|usdt|dollar)\s*$")
+CALC_REGEX = re.compile(r"^\s*(\d+(?:\.\d*)?)\s*([a-z]{2,10})\s*$")
 
 async def get_avg_usdt_toman_rate() -> Optional[float]:
     bitpin, wallex = await asyncio.gather(fetch_bitpin_usdt(), fetch_wallex_usdt())
@@ -461,7 +481,8 @@ async def handle_gold_gram_calculator(message: types.Message):
     total_toman = grams * price_per_gram_toman
     
     total_num, total_suffix = get_persian_abbrev(total_toman)
-    amount_str = f"{grams:,.0f}" if grams.is_integer() else f"{grams:,.2f}".rstrip('0').rstrip('.')
+    # رفع مشکل گرد کردن اعشار
+    amount_str = f"{grams:,.6f}".rstrip('0').rstrip('.')
 
     lines = [
         f"⚖️ وزن : <code>{amount_str}</code> گرم (طلای ۱۸ عیار)",
@@ -490,7 +511,8 @@ async def handle_dollar_calculator(message: types.Message):
 
     total_toman = amount * toman_rate
     
-    amount_str = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.2f}".rstrip('0').rstrip('.')
+    # رفع مشکل گرد کردن اعشار
+    amount_str = f"{amount:,.6f}".rstrip('0').rstrip('.')
     total_num, total_suffix = get_persian_abbrev(total_toman)
     
     lines = [
@@ -550,9 +572,9 @@ async def handle_crypto_calculator(message: types.Message):
 
     toman_rate = await get_avg_usdt_toman_rate()
     usd_value = amount * price_usd
-    amount_decimals = 8 if amount < 1 else 4
     
-    amount_str = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.{amount_decimals}f}".rstrip('0').rstrip('.')
+    # رفع مشکل گرد کردن اعشار
+    amount_str = f"{amount:,.8f}".rstrip('0').rstrip('.')
 
     coin_emoji = CRYPTO_EMOJIS.get(symbol, DEFAULT_CRYPTO_EMOJI)
 
