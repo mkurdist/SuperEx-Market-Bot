@@ -142,8 +142,10 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
     text = text.translate(_DIGIT_TRANS)
-    text = re.sub(r'[؟?!.،,]', '', text)
-    return text.strip().lower()
+    # رفع باگ اعشار: کاما حذف می‌شود، نقطه می‌ماند تا اعشار خراب نشود
+    text = text.replace(',', '')
+    text = re.sub(r'[؟?!،]', '', text)
+    return text.strip(' .').lower()
 
 def is_valid_keyword_trigger(message: types.Message, keywords: set) -> bool:
     if message.reply_to_message is not None:
