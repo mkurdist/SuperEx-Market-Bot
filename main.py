@@ -13,6 +13,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
+# --- تغییر ۱: uvloop -----------------------------------------------------
+# جایگزینی موتور async پیش‌فرض پایتون با uvloop (سریع‌تر، هسته C).
+# هیچ منطقی تغییر نمی‌کند؛ فقط اجرای همان کد async سریع‌تر می‌شود.
+import uvloop
+uvloop.install()
+# ---------------------------------------------------------------------------
+
 from aiogram import Bot, Dispatcher, types, F
 from aiohttp import web
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
@@ -23,7 +30,8 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------
 # ماژول ایزوله ۳ قابلیت جدید
 # ---------------------------------------------------------
-from tools import tools_router
+# تغییر ۲: علاوه بر روتر، تابع رفرش پس‌زمینه‌ی طلا/دلار/تتر را هم ایمپورت می‌کنیم
+from tools import tools_router, background_price_refresh_loop
 
 # ---------------------------------------------------------
 # Configuration & Setup
@@ -544,8 +552,15 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # اجرای تسک پس‌زمینه برای آپدیت نرخ تتر
+    # اجرای تسک پس‌زمینه برای آپدیت نرخ تتر (کریپتو)
     asyncio.create_task(update_tether_rate_loop())
+
+    # --- تغییر ۲: اجرای تسک پس‌زمینه‌ی رفرش کش طلا/دلار/تتر (tools.py) ---
+    # این تسک هر ۱۰ ثانیه یک‌بار دیتای tgju/بیت‌پین/والکس را در پس‌زمینه
+    # تازه نگه می‌دارد تا هندلرهای «طلا»/«دلار»/ماشین‌حساب‌ها معمولاً
+    # مستقیماً از کش بخوانند، نه این‌که هر بار منتظر یک درخواست شبکه بمانند.
+    asyncio.create_task(background_price_refresh_loop())
+    # ---------------------------------------------------------------------
 
     logging.info("🚀 Bot polling started")
     try:
