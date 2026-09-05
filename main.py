@@ -121,10 +121,13 @@ CHART_RENDER_EXECUTOR = ThreadPoolExecutor(
 
 CHART_RENDER_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_CHARTS", "4")))
 
-CHART_CACHE_TTL = 30  
+# TTL بزرگ‌تر از قبل (30s->45s / 10s->25s) چون یک تسک پس‌زمینه (background_hot_symbols_loop)
+# هر 20 ثانیه نمادهای پرتکرار را از قبل گرم نگه می‌دارد؛ این باعث می‌شود چک TTL هنگام
+# درخواست واقعی کاربر معمولاً "تازه" را ببیند و مستقیماً از کش سرو کند.
+CHART_CACHE_TTL = 45
 CHART_CACHE: dict = {}
 
-PRICE_CACHE_TTL = 10  
+PRICE_CACHE_TTL = 25
 PRICE_CACHE: dict = {}
 
 _CACHE_MAX_ENTRIES = 300  
@@ -352,6 +355,45 @@ async def generate_chart_image(symbol: str, timeframe: str) -> bytes:
     _cache_set(CHART_CACHE, cache_key, image_bytes)
     return image_bytes
 
+# ---------------------------------------------------------
+# تسک پس‌زمینه: گرم نگه‌داشتن قیمت + چارت نمادهای پرتکرار
+# ---------------------------------------------------------
+# نمادهایی که قرار است از قبل (پیش از درخواست کاربر) در پس‌زمینه رفرش شوند.
+# قابل تنظیم با متغیر محیطی HOT_SYMBOLS (کاما جدا)، مثلاً: "BTC,ETH,TON,SOL,BNB,XRP"
+# توجه: USDT عمداً در لیست نیست، چون این سرویس‌ها قیمت هر نماد را نسبت به
+# جفت‌ارز XXXUSDT برمی‌گردانند و برای خودِ USDT معنا/بازاری وجود ندارد.
+HOT_SYMBOLS = [
+    s.strip().upper()
+    for s in os.getenv("HOT_SYMBOLS", "BTC,ETH,TON,SOL,BNB").split(",")
+    if s.strip()
+]
+HOT_SYMBOLS_TIMEFRAME = "1h"  # همان تایم‌فریم پیش‌فرضی که handle_ticker_input نشان می‌دهد
+HOT_SYMBOLS_REFRESH_INTERVAL = int(os.getenv("HOT_SYMBOLS_REFRESH_INTERVAL", "20"))
+
+async def background_hot_symbols_loop():
+    """
+    هر HOT_SYMBOLS_REFRESH_INTERVAL ثانیه، قیمت و چارت ۱h پرتکرارترین
+    نمادها را از قبل (مستقل از پیام کاربر) واکشی/رندر و در همان
+    PRICE_CACHE / CHART_CACHE موجود ذخیره می‌کند. هیچ منطق fetch یا
+    فرمول محاسباتی جدیدی اینجا نیست؛ فقط همان get_price_data_cached و
+    generate_chart_image موجود، زودتر و پیشگیرانه صدا زده می‌شوند تا وقتی
+    کاربر یکی از این نمادها را می‌فرستد، اغلب مستقیماً از کش سرو شود.
+
+    خطای هر نماد مستقل است (return_exceptions=True) و باعث توقف کل
+    حلقه یا رفرش سایر نمادها نمی‌شود.
+    """
+    while True:
+        try:
+            tasks = []
+            for symbol in HOT_SYMBOLS:
+                tasks.append(get_price_data_cached(symbol))
+                tasks.append(generate_chart_image(symbol, HOT_SYMBOLS_TIMEFRAME))
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            logging.error(f"Error in background_hot_symbols_loop: {e}")
+        await asyncio.sleep(HOT_SYMBOLS_REFRESH_INTERVAL)
+
 def get_price_keyboard(symbol: str) -> InlineKeyboardMarkup:
     url_register = "https://app.superex.live/register?invitationCode=VQK2N6DDS"
     url_group = "https://t.me/SuperexIR"
@@ -560,6 +602,13 @@ async def main():
     # تازه نگه می‌دارد تا هندلرهای «طلا»/«دلار»/ماشین‌حساب‌ها معمولاً
     # مستقیماً از کش بخوانند، نه این‌که هر بار منتظر یک درخواست شبکه بمانند.
     asyncio.create_task(background_price_refresh_loop())
+    # ---------------------------------------------------------------------
+
+    # --- تغییر ۳: گرم نگه‌داشتن قیمت/چارت نمادهای پرتکرار کریپتو ---
+    # این تسک هر HOT_SYMBOLS_REFRESH_INTERVAL ثانیه، قیمت و چارت ۱h نمادهای
+    # HOT_SYMBOLS را از قبل رفرش می‌کند تا کاربرانی که این نمادها را می‌فرستند
+    # اغلب بلافاصله (به‌جای صبر برای fetch زنده + رندر چارت) پاسخ بگیرند.
+    asyncio.create_task(background_hot_symbols_loop())
     # ---------------------------------------------------------------------
 
     logging.info("🚀 Bot polling started")
