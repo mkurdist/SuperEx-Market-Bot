@@ -10,6 +10,17 @@ tools.py
 تمام خروجی‌های متنی این فایل با parse_mode="HTML" ارسال می‌شوند.
 در گروه‌ها، در صورت خطا یا عدم موفقیت در دریافت داده، پیامی ارسال
 نمی‌شود (Silent Fail) تا اسپم ایجاد نشود. ربات پیام‌های ریپلای را نادیده می‌گیرد.
+
+---------------------------------------------------------
+یادداشت بهینه‌سازی سرعت (بدون تغییر منطق استعلام‌ها):
+هر منبع (tgju، بیت‌پین، والکس) به دو تابع تقسیم شده:
+    - _fetch_..._fresh()  -> همان کد اصلی که واقعاً شبکه را صدا می‌زند و کش را آپدیت می‌کند
+    - fetch_...()          -> همان رابط قبلی؛ اول کش را چک می‌کند، وگرنه fresh را صدا می‌زند
+یک تسک پس‌زمینه (background_price_refresh_loop) هر ۱۰ ثانیه fresh() ها را
+صدا می‌زند تا کش همیشه تازه بماند. نتیجه: وقتی کاربر «طلا» یا «دلار» می‌فرستد،
+اغلب اوقات هندلر فقط از کش می‌خواند و منتظر شبکه نمی‌ماند؛ منطق و فرمول‌های
+محاسباتی و شرط‌های موفقیت/شکست دقیقاً همان قبلی‌اند.
+---------------------------------------------------------
 """
 
 import asyncio
@@ -219,20 +230,28 @@ TGJU_HEADERS = {
     "Referer": "https://www.tgju.org/",
 }
 
+# TTL بزرگ‌تر از قبل (5s -> 15s) چون یک تسک پس‌زمینه هر 10s کش را تازه نگه می‌دارد.
 _TGJU_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
-_TGJU_CACHE_TTL = 5.0
+_TGJU_CACHE_TTL = 15.0
+
+async def _fetch_tgju_data_fresh() -> Optional[dict]:
+    """
+    فراخوانی واقعی شبکه (همان منطق سابق fetch_tgju_data) و آپدیت کش.
+    هم توسط هندلرها (وقتی کش سرد است) و هم توسط تسک پس‌زمینه صدا زده می‌شود.
+    """
+    for url in TGJU_MIRRORS:
+        data = await _fetch_json(url, headers=TGJU_HEADERS)
+        if data and isinstance(data, dict) and data.get("current"):
+            _TGJU_CACHE["data"] = data
+            _TGJU_CACHE["ts"] = time.time()
+            return data
+    return None
 
 async def fetch_tgju_data() -> Optional[dict]:
     now = time.time()
     if _TGJU_CACHE["data"] and (now - _TGJU_CACHE["ts"]) < _TGJU_CACHE_TTL:
         return _TGJU_CACHE["data"]
-    for url in TGJU_MIRRORS:
-        data = await _fetch_json(url, headers=TGJU_HEADERS)
-        if data and isinstance(data, dict) and data.get("current"):
-            _TGJU_CACHE["data"] = data
-            _TGJU_CACHE["ts"] = now
-            return data
-    return None
+    return await _fetch_tgju_data_fresh()
 
 # استفاده از نماد اسپات طلا بجای فیوچرز برای چارت بی‌نقص و ۲۴ ساعته
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
@@ -361,8 +380,8 @@ async def handle_gold_price(message: types.Message):
 # ===========================================================
 DOLLAR_KEYWORDS = {"دلار", "تتر", "usdt", "dollar", "قیمت دلار", "قیمت تتر", "نرخ دلار"}
 
-# سیستم کش برای جلوگیری از لیمیت شدن ربات توسط صرافی‌های ایرانی
-_EXCHANGE_CACHE_TTL = 10.0
+# TTL بزرگ‌تر از قبل (10s -> 15s) چون تسک پس‌زمینه هر 10s این کش‌ها را تازه می‌کند.
+_EXCHANGE_CACHE_TTL = 15.0
 _BITPIN_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 _WALLEX_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 
@@ -374,11 +393,8 @@ async def fetch_tgju_dollar_toman() -> Optional[float]:
     val = _clean_numeric(item.get("p"))
     return val / 10 if val else None
 
-async def fetch_bitpin_usdt() -> Optional[dict]:
-    now = time.time()
-    if _BITPIN_CACHE["data"] and (now - _BITPIN_CACHE["ts"]) < _EXCHANGE_CACHE_TTL:
-        return _BITPIN_CACHE["data"]
-    
+async def _fetch_bitpin_usdt_fresh() -> Optional[dict]:
+    """فراخوانی واقعی شبکه (همان منطق سابق fetch_bitpin_usdt) و آپدیت کش."""
     url = "https://api.bitpin.ir/v1/mkt/markets/"
     data = await _fetch_json(url)
     if not data: return None
@@ -389,16 +405,19 @@ async def fetch_bitpin_usdt() -> Optional[dict]:
             if code == "USDT_IRT":
                 result = {"price_toman": float(m.get("price")), "change": m.get("price_change_percent") or m.get("change")}
                 _BITPIN_CACHE["data"] = result
-                _BITPIN_CACHE["ts"] = now
+                _BITPIN_CACHE["ts"] = time.time()
                 return result
     except Exception: pass
     return None
 
-async def fetch_wallex_usdt() -> Optional[dict]:
+async def fetch_bitpin_usdt() -> Optional[dict]:
     now = time.time()
-    if _WALLEX_CACHE["data"] and (now - _WALLEX_CACHE["ts"]) < _EXCHANGE_CACHE_TTL:
-        return _WALLEX_CACHE["data"]
-        
+    if _BITPIN_CACHE["data"] and (now - _BITPIN_CACHE["ts"]) < _EXCHANGE_CACHE_TTL:
+        return _BITPIN_CACHE["data"]
+    return await _fetch_bitpin_usdt_fresh()
+
+async def _fetch_wallex_usdt_fresh() -> Optional[dict]:
+    """فراخوانی واقعی شبکه (همان منطق سابق fetch_wallex_usdt) و آپدیت کش."""
     url = "https://api.wallex.ir/v1/markets"
     data = await _fetch_json(url)
     if not data: return None
@@ -408,10 +427,16 @@ async def fetch_wallex_usdt() -> Optional[dict]:
         if item: 
             result = {"price_toman": float(item.get("stats", {}).get("lastPrice")), "change": item.get("stats", {}).get("dailyChangePercent") or item.get("stats", {}).get("24h_ch")}
             _WALLEX_CACHE["data"] = result
-            _WALLEX_CACHE["ts"] = now
+            _WALLEX_CACHE["ts"] = time.time()
             return result
     except Exception: pass
     return None
+
+async def fetch_wallex_usdt() -> Optional[dict]:
+    now = time.time()
+    if _WALLEX_CACHE["data"] and (now - _WALLEX_CACHE["ts"]) < _EXCHANGE_CACHE_TTL:
+        return _WALLEX_CACHE["data"]
+    return await _fetch_wallex_usdt_fresh()
 
 def _format_change(change: Any) -> str:
     val = _clean_numeric(change)
@@ -596,3 +621,28 @@ async def handle_crypto_calculator(message: types.Message):
 
     lines.append(FOOTER)
     await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ===========================================================
+# تسک پس‌زمینه: تازه نگه‌داشتن کش طلا/دلار/تتر
+# (تغییر ۲ - بدون هیچ تغییری در منطق استعلام‌ها یا فرمول‌ها)
+# ===========================================================
+async def background_price_refresh_loop():
+    """
+    هر ۱۰ ثانیه یک‌بار داده‌ی tgju، بیت‌پین و والکس را در پس‌زمینه
+    (مستقل از پیام کاربر) رفرش می‌کند تا کش همیشه تازه بماند.
+    نتیجه: هندلرهای «طلا»/«دلار»/ماشین‌حساب‌ها اغلب فقط از کش می‌خوانند
+    و منتظر یک round-trip شبکه در لحظه‌ی پاسخ به کاربر نمی‌مانند.
+    خطای هر منبع مستقل است و باعث توقف حلقه یا منابع دیگر نمی‌شود.
+    """
+    while True:
+        try:
+            await asyncio.gather(
+                _fetch_tgju_data_fresh(),
+                _fetch_bitpin_usdt_fresh(),
+                _fetch_wallex_usdt_fresh(),
+                return_exceptions=True,
+            )
+        except Exception as e:
+            logger.warning(f"[tools] background_price_refresh_loop error: {e}")
+        await asyncio.sleep(10)
