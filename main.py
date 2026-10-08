@@ -33,6 +33,15 @@ from dotenv import load_dotenv
 # تغییر ۲: علاوه بر روتر، تابع رفرش پس‌زمینه‌ی طلا/دلار/تتر را هم ایمپورت می‌کنیم
 from tools import tools_router, background_price_refresh_loop
 
+# ماژول ایزوله‌ی مدیریت گروه: آمار فعالیت اعضا + عضویت اجباری کانال
+from group_tools import (
+    setup_group_tools, init_group_tools,
+    group_tools_background_loop, shutdown_group_tools,
+)
+
+# مانیتور خبرهای لیست جدید (فقط اگر LISTING_CHAT_ID تنظیم شده باشد اجرا می‌شود)
+from listing_monitor import start_in_background as start_listing_monitor
+
 # ---------------------------------------------------------
 # Configuration & Setup
 # ---------------------------------------------------------
@@ -571,6 +580,7 @@ async def process_chart_timeframe(query: types.CallbackQuery, callback_data: Cha
 # اتصال روتر ۳ قابلیت جدید
 # ---------------------------------------------------------
 dp.include_router(tools_router)
+setup_group_tools(dp)   # middleware (شمارش + عضویت اجباری) و هندلر /stats
 
 # ---------------------------------------------------------
 # Web Server Setup (For Render)
@@ -609,12 +619,21 @@ async def main():
     # HOT_SYMBOLS را از قبل رفرش می‌کند تا کاربرانی که این نمادها را می‌فرستند
     # اغلب بلافاصله (به‌جای صبر برای fetch زنده + رندر چارت) پاسخ بگیرند.
     asyncio.create_task(background_hot_symbols_loop())
+
+    # --- مدیریت گروه: دیتابیس آمار + ذخیره‌ی دسته‌ای + ارسال خودکار ---
+    init_group_tools()
+    asyncio.create_task(group_tools_background_loop(bot))
+
+    # --- مانیتور خبرهای لیست جدید SuperEx (در یک thread جدا) ---
+    if os.getenv("LISTING_CHAT_ID"):
+        start_listing_monitor()
     # ---------------------------------------------------------------------
 
     logging.info("🚀 Bot polling started")
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"])
     finally:
+        await shutdown_group_tools()
         await shared_session.close()
         CHART_RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
