@@ -22,6 +22,7 @@ uvloop.install()
 
 from aiogram import Bot, Dispatcher, types, F
 from aiohttp import web
+from tweets_feature import setup_tweets_feature
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.filters.callback_data import CallbackData
 from aiogram.filters import CommandStart
@@ -594,6 +595,8 @@ async def main():
     
     app = web.Application()
     app.router.add_get('/', health_check)
+    if os.getenv('TWEETS_ENABLED', 'false').lower() in ('1', 'true', 'yes', 'on'):
+        setup_tweets_feature(app, bot, shared_session)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -633,6 +636,7 @@ async def main():
     try:
         await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"])
     finally:
+        await runner.cleanup()
         await shutdown_group_tools()
         await shared_session.close()
         CHART_RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
