@@ -6,14 +6,38 @@ import os
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 log = logging.getLogger(__name__)
-_ALLOWED = {'superex', 'superexpersian'}
+_ALLOWED = {'superexpersian'}
 _ID = re.compile(r'^[A-Za-z0-9_-]{1,100}$')
+
+
+def first_photo(row):
+    media = row.get('media')
+    if not isinstance(media, list):
+        return None
+    for entry in media:
+        if not isinstance(entry, dict) or entry.get('type') != 'photo':
+            continue
+        url = entry.get('mediaUrl')
+        if isinstance(url, str):
+            parsed = urlsplit(url)
+            if parsed.scheme == 'https' and parsed.hostname == 'pbs.twimg.com' and not parsed.username and not parsed.password:
+                return url
+    return None
+
+
+def utf16_length(text):
+    return len(text.encode('utf-16-le')) // 2
+
+
+def truncate_utf16(text, limit):
+    return text.encode('utf-16-le')[:limit * 2].decode('utf-16-le', errors='ignore')
 
 
 def parse_item(row):
@@ -43,17 +67,17 @@ def parse_item(row):
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError('Invalid createdAt') from exc
     return {'id': tweet_id, 'text': text, 'username': username,
-            'time': stamp.astimezone(timezone.utc),
+            'time': stamp.astimezone(timezone.utc), 'photo': first_photo(row),
             'url': f'https://x.com/{username}/status/{tweet_id}'}
 
 
-def message_for(item):
+def message_for(item, max_units=3900):
     suffix = '\n\n' + item['url']
-    prefix = '@' + item['username'] + '\n\n'
+    prefix = 'توییتر فارسی صرافی سوپراکس\n\n'
     text = item['text'].strip()
-    limit = 3900 - len(prefix) - len(suffix)
-    if len(text) > limit:
-        text = text[:limit - 1] + '…'
+    limit = max_units - utf16_length(prefix) - utf16_length(suffix)
+    if utf16_length(text) > limit:
+        text = truncate_utf16(text, limit - 1) + '…'
     return prefix + text + suffix
 
 
@@ -135,6 +159,20 @@ class TweetsFeature:
             raise ValueError('Dataset is not a list')
         return data
 
+    async def send_tweet(self, tweet):
+        photo = tweet.get('photo')
+        if photo:
+            try:
+                # Telegram fetches the image URL; Render does not download it.
+                await self.bot.send_photo(self.chat, photo=photo,
+                                          caption=message_for(tweet, max_units=1000),
+                                          parse_mode=None)
+                return
+            except TelegramBadRequest:
+                # Explicit rejection: safe to fall back to a text message.
+                log.warning('Photo rejected for tweet %s; sending text', tweet['id'])
+        await self.bot.send_message(self.chat, message_for(tweet), parse_mode=None)
+
     async def process(self, job):
         if job['event_type'] != 'ACTOR.RUN.SUCCEEDED':
             if not await self.alert('⚠️ اجرای Apify ناموفق بود: ' + job['event_type'] + '\nRun: ' + job['run_id']):
@@ -155,7 +193,7 @@ class TweetsFeature:
             if not claimed:
                 continue
             try:
-                await self.bot.send_message(self.chat, message_for(tweet), parse_mode=None)
+                await self.send_tweet(tweet)
             except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter) as exc:
                 # Explicit Telegram rejection: no message was accepted; release claim.
                 await self.db('seen_tweets', 'DELETE', params={'tweet_id': 'eq.' + tweet['id']},
