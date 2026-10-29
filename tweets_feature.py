@@ -73,7 +73,7 @@ def parse_item(row):
 
 def message_for(item, max_units=3900):
     suffix = '\n\n' + item['url']
-    prefix = 'توییتر فارسی صرافی سوپراکس\n\n'
+    prefix = 'تویت جدید پیج فارسی\n\n'
     text = item['text'].strip()
     limit = max_units - utf16_length(prefix) - utf16_length(suffix)
     if utf16_length(text) > limit:
